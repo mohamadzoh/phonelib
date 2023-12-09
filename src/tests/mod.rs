@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::{constants::COUNTRIES, {is_valid_phone_number, extract_country, phone_number_cleaner, cleaned_phone_number}};
+    use crate::{{is_valid_phone_number, extract_country, phone_number_cleaner, cleaned_phone_number}};
 
     #[test]
     fn test_is_valid_phone_number() {
