@@ -7,7 +7,7 @@ repository = "https://github.com/mohamadzoh/phonelib"
 description = "A library that helps you work with phone numbers"
 maintainer = "Mohamad Al Zohbie"
 license = "MIT"
-keywords = ["phone", "validate", "libphonenumber-rs", "phonelib","phone number"]
+keywords = ["phone", "validate", "libphonenumber-rs", "phonelib","number"]
 
 [lib]
 name = "phonelib"
