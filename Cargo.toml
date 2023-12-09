@@ -2,8 +2,12 @@
 name = "phonelib"
 version = "0.1.0"
 edition = "2021"
-authors = ["Mohamad Zohbie <alzoubi528@gmail.com>"]
+authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 repository = "https://github.com/mohamadzoh/phonelib"
+description = "A library that helps you work with phone numbers"
+maintainer = "Mohamad Al Zohbie"
+license = "MIT"
+keywords = ["phone", "validate", "libphonenumber-rs", "phonelib","phone number"]
 
 [lib]
 name = "phonelib"
