@@ -4,11 +4,12 @@ use definitions::Country;
 mod constants;
 mod definitions;
 mod tests;
+
 pub fn is_valid_phone_number(phone_number: String) -> bool {
     if contains_invalid_character(&phone_number) {
         return false;
     }
-    cleaned_phone_number(phone_number).is_some()
+    normalize_phone_number(phone_number).is_some()
 }
 
 pub fn extract_country(phone_number: String) -> Option<&'static Country> {
@@ -16,11 +17,11 @@ pub fn extract_country(phone_number: String) -> Option<&'static Country> {
     remove_unwanted_character(&mut phone_number);
     extract_country_data(&phone_number)
 }
-pub fn cleaned_phone_number(phone_number: String) -> Option<String> {
-    phone_number_cleaner(&mut phone_number.clone())
+pub fn normalize_phone_number(phone_number: String) -> Option<String> {
+    normalize_phone_number_in_place(&mut phone_number.clone())
 }
 
-pub fn phone_number_cleaner(phone_number: &mut String) -> Option<String> {
+pub fn normalize_phone_number_in_place(phone_number: &mut String) -> Option<String> {
     remove_unwanted_character(phone_number);
     println!("xxxxxx{}xxxxxxxx", phone_number);
     // Extrpub fn extract_country(phone_number: &mut String) -> Option<>act country data
@@ -33,9 +34,9 @@ pub fn phone_number_cleaner(phone_number: &mut String) -> Option<String> {
     leading_zero_remover(phone_number);
 
     // Add country code again
-    let cleaned_phone_number = format!("+{}{}", country.prefix, phone_number);
+    let normalize_phone_number = format!("+{}{}", country.prefix, phone_number);
 
-    Some(cleaned_phone_number)
+    Some(normalize_phone_number)
 }
 
 fn remove_unwanted_character(phone_number: &mut String) {
