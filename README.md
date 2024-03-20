@@ -8,7 +8,7 @@ Add this to your `Cargo.toml`:
 
 ```
 [dependencies]
-phonelib = "0.1.1"
+phonelib = "0.1.2"
 ```
 
 ## Struct
