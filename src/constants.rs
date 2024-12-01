@@ -2,12 +2,18 @@ use crate::definitions;
 
 use definitions::Country;
 
-pub const COUNTRIES: [Country; 245] = [
+pub const COUNTRIES: [Country; 246] = [
     Country {
         name: "Andorra",
         code: "AD",
         phone_lengths: &[6],
         prefix: 376,
+    },
+    Country {
+        name: "Ascension Island",
+        code: "AC",
+        phone_lengths: &[4, 5, 6],
+        prefix: 247,
     },
     Country {
         name: "United Arab Emirates",
@@ -132,7 +138,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Bulgaria",
         code: "BG",
-        phone_lengths: &[9],
+        phone_lengths: &[7, 8, 9],
         prefix: 359,
     },
     Country {
@@ -186,7 +192,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Bolivia",
         code: "BO",
-        phone_lengths: &[9],
+        phone_lengths: &[8, 9],
         prefix: 591,
     },
     Country {
@@ -204,7 +210,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Bhutan",
         code: "BT",
-        phone_lengths: &[7],
+        phone_lengths: &[7, 8],
         prefix: 975,
     },
     Country {
@@ -216,7 +222,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Botswana",
         code: "BW",
-        phone_lengths: &[7],
+        phone_lengths: &[7, 8],
         prefix: 267,
     },
     Country {
@@ -264,7 +270,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Cote d'Ivoire",
         code: "CI",
-        phone_lengths: &[8],
+        phone_lengths: &[8, 9],
         prefix: 225,
     },
     Country {
@@ -318,7 +324,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Curacao",
         code: "CW",
-        phone_lengths: &[7],
+        phone_lengths: &[7, 8],
         prefix: 599,
     },
     Country {
@@ -456,7 +462,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Gabon",
         code: "GA",
-        phone_lengths: &[7],
+        phone_lengths: &[8, 9],
         prefix: 241,
     },
     Country {
@@ -640,9 +646,9 @@ pub const COUNTRIES: [Country; 245] = [
         prefix: 964,
     },
     Country {
-        name: "Iran, Islamic Republic of",
+        name: "Iran",
         code: "IR",
-        phone_lengths: &[11],
+        phone_lengths: &[11, 10],
         prefix: 98,
     },
     Country {
@@ -684,7 +690,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Kenya",
         code: "KE",
-        phone_lengths: &[10],
+        phone_lengths: &[9],
         prefix: 254,
     },
     Country {
@@ -696,13 +702,13 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Cambodia",
         code: "KH",
-        phone_lengths: &[9],
+        phone_lengths: &[8, 9],
         prefix: 855,
     },
     Country {
         name: "Kiribati",
         code: "KI",
-        phone_lengths: &[8],
+        phone_lengths: &[5],
         prefix: 686,
     },
     Country {
@@ -720,7 +726,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Korea, Democratic People's Republic of",
         code: "KP",
-        phone_lengths: &[4, 6, 7, 13],
+        phone_lengths: &[6, 7, 8, 10, 11],
         prefix: 850,
     },
     Country {
@@ -798,7 +804,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Luxembourg",
         code: "LU",
-        phone_lengths: &[9],
+        phone_lengths: &[4, 5, 6, 7, 8, 9],
         prefix: 352,
     },
     Country {
@@ -846,7 +852,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Madagascar",
         code: "MG",
-        phone_lengths: &[7],
+        phone_lengths: &[7, 8, 9],
         prefix: 261,
     },
     Country {
@@ -1044,13 +1050,13 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "French Polynesia",
         code: "PF",
-        phone_lengths: &[6],
+        phone_lengths: &[8],
         prefix: 689,
     },
     Country {
         name: "Papua New Guinea",
         code: "PG",
-        phone_lengths: &[7],
+        phone_lengths: &[7, 8],
         prefix: 675,
     },
     Country {
@@ -1074,7 +1080,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Saint Pierre and Miquelon",
         code: "PM",
-        phone_lengths: &[6],
+        phone_lengths: &[6, 8, 9],
         prefix: 508,
     },
     Country {
@@ -1146,7 +1152,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Solomon Islands",
         code: "SB",
-        phone_lengths: &[7],
+        phone_lengths: &[5, 6, 7],
         prefix: 677,
     },
     Country {
@@ -1176,13 +1182,13 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Saint Helena",
         code: "SH",
-        phone_lengths: &[4],
+        phone_lengths: &[4, 5],
         prefix: 290,
     },
     Country {
         name: "Slovenia",
         code: "SI",
-        phone_lengths: &[9],
+        phone_lengths: &[8],
         prefix: 386,
     },
     Country {
@@ -1206,7 +1212,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "San Marino",
         code: "SM",
-        phone_lengths: &[10],
+        phone_lengths: &[6, 7, 8, 9, 10],
         prefix: 378,
     },
     Country {
@@ -1302,7 +1308,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Tokelau",
         code: "TK",
-        phone_lengths: &[5],
+        phone_lengths: &[4, 5],
         prefix: 690,
     },
     Country {
@@ -1314,7 +1320,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Turkmenistan",
         code: "TM",
-        phone_lengths: &[8],
+        phone_lengths: &[8, 9],
         prefix: 993,
     },
     Country {
@@ -1326,7 +1332,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Tonga",
         code: "TO",
-        phone_lengths: &[5],
+        phone_lengths: &[5, 6, 7, 8],
         prefix: 676,
     },
     Country {
@@ -1344,7 +1350,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Tuvalu",
         code: "TV",
-        phone_lengths: &[5],
+        phone_lengths: &[5, 6, 7],
         prefix: 688,
     },
     Country {
@@ -1380,7 +1386,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Uruguay",
         code: "UY",
-        phone_lengths: &[9],
+        phone_lengths: &[8, 9],
         prefix: 598,
     },
     Country {
@@ -1428,7 +1434,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Vanuatu",
         code: "VU",
-        phone_lengths: &[7],
+        phone_lengths: &[5, 6, 7],
         prefix: 678,
     },
     Country {
@@ -1440,7 +1446,7 @@ pub const COUNTRIES: [Country; 245] = [
     Country {
         name: "Samoa",
         code: "WS",
-        phone_lengths: &[7],
+        phone_lengths: &[5, 6, 7],
         prefix: 685,
     },
     Country {
