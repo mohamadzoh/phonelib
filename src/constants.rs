@@ -78,13 +78,13 @@ pub const COUNTRIES: [Country; 246] = [
     Country {
         name: "Austria",
         code: "AT",
-        phone_lengths: &[10, 11],
+        phone_lengths: &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         prefix: 43,
     },
     Country {
         name: "Australia",
         code: "AU",
-        phone_lengths: &[9],
+        phone_lengths: &[9, 10],
         prefix: 61,
     },
     Country {
@@ -126,7 +126,7 @@ pub const COUNTRIES: [Country; 246] = [
     Country {
         name: "Belgium",
         code: "BE",
-        phone_lengths: &[9],
+        phone_lengths: &[9, 10],
         prefix: 32,
     },
     Country {
@@ -342,7 +342,7 @@ pub const COUNTRIES: [Country; 246] = [
     Country {
         name: "Czech Republic",
         code: "CZ",
-        phone_lengths: &[9],
+        phone_lengths: &[6, 7, 8, 9],
         prefix: 420,
     },
     Country {

@@ -930,4 +930,26 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn test_cases() {
+        let test_cases = vec![
+            (String::from("+61485906541"), true),
+            (String::from("+4306935893571"), true),
+            (String::from("+32468799972"), true),
+            (String::from("+5561981737725"), true),
+            (String::from("+44 7406514755"), true),
+            (String::from("+54 9119298464"), true),
+            (String::from("+61 4129228042"), true),
+            (String::from("+43 6642428349"), true),
+            (String::from("+32 4706460538"), true),
+            (String::from("+420 601139706"), true),
+
+        ];
+
+        for (phone, valid) in test_cases {
+            let is_valid = is_valid_phone_number(phone.clone());
+            assert_eq!(is_valid, valid);
+        }
+    }
 }
