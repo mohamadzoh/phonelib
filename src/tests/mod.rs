@@ -2,7 +2,11 @@
 mod tests {
     use crate::{
         extract_country, is_valid_phone_number, normalize_phone_number,
-        normalize_phone_number_in_place,
+        normalize_phone_number_in_place, format_phone_number, PhoneFormat,
+        detect_phone_number_type, PhoneNumberType, is_mobile_number,
+        is_landline_number, is_toll_free_number, generate_random_phone_number,
+        are_phone_numbers_equal, validate_phone_numbers_batch,
+        suggest_phone_number_corrections, is_potentially_valid_phone_number,
     };
 
     struct PhoneNumber {
@@ -952,6 +956,111 @@ mod tests {
         for (phone, valid) in test_cases {
             let is_valid = is_valid_phone_number(phone.clone());
             assert_eq!(is_valid, valid);
+        }
+    }
+
+    #[test]
+    fn test_phone_number_formatting() {
+        let number = "+12345678901".to_string();
+        
+        // Test E.164 format
+        let e164 = format_phone_number(number.clone(), PhoneFormat::E164);
+        assert_eq!(e164, Some("+12345678901".to_string()));
+        
+        // Test International format
+        let intl = format_phone_number(number.clone(), PhoneFormat::International);
+        assert!(intl.is_some());
+        
+        // Test National format
+        let national = format_phone_number(number.clone(), PhoneFormat::National);
+        assert!(national.is_some());
+        
+        // Test RFC3966 format
+        let rfc = format_phone_number(number.clone(), PhoneFormat::RFC3966);
+        assert!(rfc.is_some());
+    }
+
+    #[test]
+    fn test_phone_number_type_detection() {
+        // Test US toll-free number
+        let toll_free = is_toll_free_number("18001234567".to_string());
+        assert!(toll_free || !is_valid_phone_number("18001234567".to_string()));
+        
+        // Test mobile detection function
+        let mobile_result = is_mobile_number("447123456789".to_string());
+        assert!(mobile_result || !is_valid_phone_number("447123456789".to_string()));
+        
+        // Test landline detection function
+        let landline_result = is_landline_number("12025551234".to_string());
+        assert!(landline_result || !is_valid_phone_number("12025551234".to_string()));
+    }
+
+    #[test]
+    fn test_random_phone_number_generation() {
+        let random_us = generate_random_phone_number("US");
+        if let Some(number) = random_us {
+            assert!(is_valid_phone_number(number));
+        }
+        
+        let random_gb = generate_random_phone_number("GB");
+        if let Some(number) = random_gb {
+            assert!(is_valid_phone_number(number));
+        }
+        
+        // Test invalid country code
+        let invalid = generate_random_phone_number("XX");
+        assert!(invalid.is_none());
+    }
+
+    #[test]
+    fn test_phone_number_equality() {
+        let num1 = "+12345678901".to_string();
+        let num2 = "12345678901".to_string();
+        let num3 = "+12345678902".to_string();
+        
+        assert!(are_phone_numbers_equal(num1.clone(), num2));
+        assert!(!are_phone_numbers_equal(num1, num3));
+    }
+
+    #[test]
+    fn test_batch_processing() {
+        let numbers = vec![
+            "+12345678901".to_string(),
+            "invalid".to_string(),
+            "+442079460958".to_string(),
+        ];
+        
+        let results = validate_phone_numbers_batch(numbers.clone());
+        assert_eq!(results.len(), 3);
+        
+        // First and third should be valid, second should be invalid
+        assert!(results[0]);
+        assert!(!results[1]);
+        assert!(results[2]);
+    }
+
+    #[test]
+    fn test_phone_number_suggestions() {
+        let suggestions = suggest_phone_number_corrections("123456789".to_string(), Some("US"));
+        assert!(!suggestions.is_empty());
+        
+        // Test potentially valid check
+        let potentially_valid = is_potentially_valid_phone_number("123-456-7890".to_string());
+        assert!(potentially_valid);
+        
+        let not_valid = is_potentially_valid_phone_number("123".to_string());
+        assert!(!not_valid);
+    }
+
+    #[test]
+    fn test_type_detection_specific_cases() {
+        // Test with known patterns
+        let phone_type = detect_phone_number_type("447123456789".to_string());
+        // Should be Some(Mobile) or None if invalid
+        assert!(phone_type.is_some() || !is_valid_phone_number("447123456789".to_string()));
+        
+        if let Some(ptype) = phone_type {
+            assert!(ptype == PhoneNumberType::Mobile || ptype == PhoneNumberType::Unknown);
         }
     }
 }
