@@ -923,6 +923,8 @@ mod tests {
                 normalized_phone_number,
                 Some(phone_number.phone_number.to_string())
             );
+            // Use country_code to avoid dead_code warning
+            assert!(!phone_number.country_code.is_empty());
         }
 
         assert_eq!(
