@@ -1,5 +1,5 @@
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use phonelib::{is_valid_phone_number, normalize_phone_number, extract_country};
-use std::time::Instant;
 
 const TEST_PHONES: &[&str] = &[
     "+12025550173",
@@ -14,45 +14,35 @@ const TEST_PHONES: &[&str] = &[
     "+14155552671",
 ];
 
-fn main() {
-    let iterations = 10000;
-    
-    println!("Running performance benchmark with {} iterations...", iterations);
-    
-    // Benchmark is_valid_phone_number
-    let start = Instant::now();
-    for _ in 0..iterations {
-        for phone in TEST_PHONES {
-            let _ = is_valid_phone_number(phone.to_string());
-        }
-    }
-    let validation_duration = start.elapsed();
-    
-    // Benchmark normalize_phone_number
-    let start = Instant::now();
-    for _ in 0..iterations {
-        for phone in TEST_PHONES {
-            let _ = normalize_phone_number(phone.to_string());
-        }
-    }
-    let normalization_duration = start.elapsed();
-    
-    // Benchmark extract_country
-    let start = Instant::now();
-    for _ in 0..iterations {
-        for phone in TEST_PHONES {
-            let _ = extract_country(phone.to_string());
-        }
-    }
-    let extraction_duration = start.elapsed();
-    
-    println!("Validation: {:?} ({:.2} ops/sec)", 
-             validation_duration, 
-             (iterations * TEST_PHONES.len()) as f64 / validation_duration.as_secs_f64());
-    println!("Normalization: {:?} ({:.2} ops/sec)", 
-             normalization_duration,
-             (iterations * TEST_PHONES.len()) as f64 / normalization_duration.as_secs_f64());
-    println!("Extraction: {:?} ({:.2} ops/sec)", 
-             extraction_duration,
-             (iterations * TEST_PHONES.len()) as f64 / extraction_duration.as_secs_f64());
+fn bench_validation(c: &mut Criterion) {
+    c.bench_function("is_valid_phone_number", |b| {
+        b.iter(|| {
+            for phone in TEST_PHONES {
+                black_box(is_valid_phone_number(black_box(phone.to_string())));
+            }
+        })
+    });
 }
+
+fn bench_normalization(c: &mut Criterion) {
+    c.bench_function("normalize_phone_number", |b| {
+        b.iter(|| {
+            for phone in TEST_PHONES {
+                black_box(normalize_phone_number(black_box(phone.to_string())));
+            }
+        })
+    });
+}
+
+fn bench_extraction(c: &mut Criterion) {
+    c.bench_function("extract_country", |b| {
+        b.iter(|| {
+            for phone in TEST_PHONES {
+                black_box(extract_country(black_box(phone.to_string())));
+            }
+        })
+    });
+}
+
+criterion_group!(benches, bench_validation, bench_normalization, bench_extraction);
+criterion_main!(benches);

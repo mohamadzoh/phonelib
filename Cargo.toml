@@ -16,3 +16,10 @@ path = "src/lib.rs"
 
 [dependencies]
 # Add your dependencies here
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "phone_benchmark"
+harness = false
