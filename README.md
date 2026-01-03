@@ -1,6 +1,11 @@
 # Phonelib
 
-Phonelib is a comprehensive Rust library for handling phone numbers. It provides functions for validation, formatting, type detection, batch processing, and much more.
+[![Crates.io](https://img.shields.io/crates/v/phonelib.svg)](https://crates.io/crates/phonelib)
+[![Documentation](https://docs.rs/phonelib/badge.svg)](https://docs.rs/phonelib)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
+
+Phonelib is a comprehensive Rust library for handling phone numbers. It provides functions for validation, formatting, type detection, text extraction, batch processing, and much more.
 
 ## Features
 
@@ -9,10 +14,12 @@ Phonelib is a comprehensive Rust library for handling phone numbers. It provides
 - 🔧 **Normalization** - Clean and standardize phone number formats
 - 🎨 **Multiple Format Support** - E.164, International, National, RFC3966
 - 📱 **Type Detection** - Identify mobile, landline, toll-free, premium numbers
+- 📝 **Text Extraction** - Parse phone numbers from free-form text
+- ⚖️ **Comparison & Equality** - Compare numbers regardless of format with `PhoneNumber` struct
 - 🎲 **Random Number Generation** - Generate valid random phone numbers
-- ⚖️ **Number Comparison** - Compare numbers regardless of format
 - 🚀 **Batch Processing** - Process multiple numbers efficiently
 - 🔍 **Smart Suggestions** - Get correction suggestions for invalid numbers
+- 🔒 **Privacy Tools** - Redact phone numbers in text
 
 ## Installation
 
@@ -20,7 +27,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phonelib = "0.2.0"
+phonelib = "0.2.1"
 ```
 
 ## Quick Start
@@ -29,16 +36,25 @@ phonelib = "0.2.0"
 use phonelib::*;
 
 // Basic validation
-let is_valid = is_valid_phone_number("+1234567890".to_string());
+let is_valid = is_valid_phone_number("+12025550173".to_string());
 
 // Format a number
 let formatted = format_phone_number(
-    "1234567890".to_string(), 
+    "12025550173".to_string(), 
     PhoneFormat::International
 );
 
 // Detect number type
-let number_type = detect_phone_number_type("+447123456789".to_string());
+let number_type = detect_phone_number_type("+442079460958".to_string());
+
+// Extract phone numbers from text
+let text = "Call me at +12025550173 or +442079460958";
+let numbers = extract_phone_numbers_from_text(text);
+
+// Compare phone numbers (PhoneNumber struct with Eq trait)
+let num1 = PhoneNumber::parse("+12025550173").unwrap();
+let num2 = PhoneNumber::parse("12025550173").unwrap();
+assert_eq!(num1, num2); // Same number, different formats
 ```
 
 ## API Reference
@@ -266,11 +282,105 @@ if is_potentially_valid_phone_number(maybe_valid) {
 }
 
 // Guess country from number patterns
-let mystery_number = "447123456789".to_string();
+let mystery_number = "442079460958".to_string();
 match guess_country_from_number(mystery_number) {
     Some(country) => println!("Likely from: {}", country.name),
     None => println!("Cannot determine country"),
 }
+```
+
+### Text Extraction
+
+Extract phone numbers from free-form text:
+
+```rust
+use phonelib::{
+    extract_phone_numbers_from_text,
+    extract_valid_phone_numbers_from_text,
+    extract_phone_numbers_with_country_hint,
+    replace_phone_numbers_in_text,
+    redact_phone_numbers,
+    count_phone_numbers_in_text,
+};
+
+let text = "Contact us at +12025550173 or call our UK office at +442079460958";
+
+// Extract all phone numbers
+let numbers = extract_phone_numbers_from_text(text);
+for num in &numbers {
+    println!("Found: {} at position {}-{}", num.raw, num.start, num.end);
+    println!("  Normalized: {:?}", num.normalized);
+    println!("  Valid: {}", num.is_valid);
+}
+
+// Extract only valid numbers
+let valid_numbers = extract_valid_phone_numbers_from_text(text);
+
+// Extract with country hint for national numbers
+let us_text = "Call (202) 555-0173 for assistance";
+let numbers = extract_phone_numbers_with_country_hint(us_text, "US");
+
+// Count phone numbers
+let count = count_phone_numbers_in_text(text);
+println!("Found {} phone numbers", count);
+
+// Replace phone numbers
+let replaced = replace_phone_numbers_in_text(text, |num| {
+    format!("[PHONE: {}]", num.normalized.as_deref().unwrap_or(&num.raw))
+});
+
+// Redact for privacy (show last 4 digits)
+let redacted = redact_phone_numbers(text, 4);
+println!("{}", redacted); // "Contact us at ********0173 or..."
+```
+
+### PhoneNumber Struct with Equality
+
+The `PhoneNumber` struct provides type-safe phone number handling with proper equality comparison:
+
+```rust
+use phonelib::{PhoneNumber, PhoneNumberSet, PhoneFormat};
+use std::collections::HashSet;
+
+// Parse phone numbers
+let num1 = PhoneNumber::parse("+12025550173").unwrap();
+let num2 = PhoneNumber::parse("12025550173").unwrap();
+let num3 = PhoneNumber::parse("+442079460958").unwrap();
+
+// Equality comparison (same number, different formats)
+assert_eq!(num1, num2);
+assert_ne!(num1, num3);
+
+// Use in HashSet for deduplication
+let mut set = HashSet::new();
+set.insert(num1.clone());
+set.insert(num2.clone()); // Won't be added - duplicate
+assert_eq!(set.len(), 1);
+
+// PhoneNumber methods
+println!("E.164: {}", num1.e164());
+println!("National: {}", num1.national_number());
+println!("Country code: {:?}", num1.country_code());
+println!("Is mobile: {}", num1.is_mobile());
+println!("Formatted: {}", num1.format(PhoneFormat::International));
+
+// Parse with country hint for national numbers
+let national = PhoneNumber::parse_with_country("2025550173", "US");
+
+// PhoneNumberSet for efficient deduplication
+let mut phone_set = PhoneNumberSet::new();
+phone_set.add("+12025550173");
+phone_set.add("12025550173");     // Duplicate - not added
+phone_set.add("+442079460958");
+assert_eq!(phone_set.len(), 2);
+
+// Check membership
+assert!(phone_set.contains("12025550173"));
+
+// Create from iterator
+let numbers = vec!["+12025550173", "12025550173", "+442079460958"];
+let set: PhoneNumberSet = numbers.into_iter().collect();
+assert_eq!(set.len(), 2);
 ```
 
 ## Country Support
@@ -385,7 +495,26 @@ cargo clippy
 
 ## Changelog
 
-### v0.2.0 (Latest)
+### v0.2.1 (Latest)
+
+🎉 **Text Extraction & Equality Release**
+
+- 📝 **Text Extraction** - Extract phone numbers from free-form text
+  - `extract_phone_numbers_from_text` - Find all phone numbers in text
+  - `extract_valid_phone_numbers_from_text` - Find only valid numbers
+  - `extract_phone_numbers_with_country_hint` - Parse with default country
+  - `replace_phone_numbers_in_text` - Custom replacement function
+  - `redact_phone_numbers` - Privacy-focused masking
+  - `count_phone_numbers_in_text` - Quick count
+- ⚖️ **PhoneNumber Struct** - Type-safe phone numbers with equality
+  - Implements `Eq`, `PartialEq`, `Hash` for use in collections
+  - Implements `Display`, `FromStr` for easy conversion
+  - Methods: `e164()`, `national_number()`, `format()`, `is_mobile()`, etc.
+- 🗂️ **PhoneNumberSet** - Efficient deduplication collection
+- 📚 **Improved Documentation** - Complete rustdoc coverage
+- 🔧 **Code Quality** - All clippy warnings resolved
+
+### v0.2.0
 
 🎉 **Major Feature Release**
 

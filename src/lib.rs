@@ -1,3 +1,42 @@
+//! # Phonelib
+//!
+//! A comprehensive Rust library for handling phone numbers.
+//!
+//! ## Features
+//!
+//! - **Validation** - Check if phone numbers are valid
+//! - **Country Detection** - Extract country information from phone numbers
+//! - **Normalization** - Clean and standardize phone number formats
+//! - **Multiple Format Support** - E.164, International, National, RFC3966
+//! - **Type Detection** - Identify mobile, landline, toll-free, premium numbers
+//! - **Text Extraction** - Parse phone numbers from free-form text
+//! - **Comparison/Equality** - Compare numbers regardless of format
+//! - **Batch Processing** - Process multiple numbers efficiently
+//!
+//! ## Quick Start
+//!
+//! ```rust
+//! use phonelib::*;
+//!
+//! // Basic validation
+//! let is_valid = is_valid_phone_number("+12025550173".to_string());
+//! assert!(is_valid);
+//!
+//! // Normalize a number
+//! let normalized = normalize_phone_number("12025550173".to_string());
+//! assert_eq!(normalized, Some("+12025550173".to_string()));
+//!
+//! // Extract phone numbers from text
+//! let text = "Call me at +12025550173 or +442079460958";
+//! let numbers = extract_phone_numbers_from_text(text);
+//! assert_eq!(numbers.len(), 2);
+//!
+//! // Compare phone numbers (different formats, same number)
+//! let num1 = PhoneNumber::parse("+12025550173").unwrap();
+//! let num2 = PhoneNumber::parse("12025550173").unwrap();
+//! assert_eq!(num1, num2);
+//! ```
+
 use constants::COUNTRIES;
 use definitions::Country;
 
@@ -7,6 +46,27 @@ mod constants;
 mod definitions;
 mod tests;
 
+/// Validates whether a phone number is valid.
+///
+/// This function checks if the provided phone number:
+/// - Contains only valid characters (digits, spaces, dashes, parentheses)
+/// - Can be normalized to a valid E.164 format
+/// - Matches a known country's phone number pattern
+///
+/// # Arguments
+/// * `phone_number` - The phone number string to validate
+///
+/// # Returns
+/// * `true` if the phone number is valid
+/// * `false` if the phone number is invalid
+///
+/// # Examples
+/// ```
+/// use phonelib::is_valid_phone_number;
+///
+/// assert!(is_valid_phone_number("+12025550173".to_string()));
+/// assert!(!is_valid_phone_number("invalid".to_string()));
+/// ```
 pub fn is_valid_phone_number(phone_number: String) -> bool {
     // check if the phone number contains invalid character
     if contains_invalid_character(&phone_number) {
@@ -17,22 +77,78 @@ pub fn is_valid_phone_number(phone_number: String) -> bool {
     normalize_phone_number(phone_number).is_some()
 }
 
+/// Extracts country information from a phone number.
+///
+/// # Arguments
+/// * `phone_number` - The phone number to analyze
+///
+/// # Returns
+/// * `Some(Country)` - The country data if the phone number matches a known country
+/// * `None` - If no country could be determined
+///
+/// # Examples
+/// ```
+/// use phonelib::extract_country;
+///
+/// let country = extract_country("+12025550173".to_string());
+/// assert!(country.is_some());
+/// assert_eq!(country.unwrap().code, "US");
+/// ```
 pub fn extract_country(phone_number: String) -> Option<&'static Country> {
     let mut phone_number = phone_number;
     remove_unwanted_character(&mut phone_number);
     extract_country_data(&phone_number)
 }
 
+/// Normalizes a phone number to E.164 format.
+///
+/// Takes a phone number in various formats and returns it in the
+/// standard E.164 format (+[country code][national number]).
+///
+/// # Arguments
+/// * `phone_number` - The phone number to normalize
+///
+/// # Returns
+/// * `Some(String)` - The normalized phone number in E.164 format
+/// * `None` - If the phone number is invalid
+///
+/// # Examples
+/// ```
+/// use phonelib::normalize_phone_number;
+///
+/// let normalized = normalize_phone_number("12025550173".to_string());
+/// assert_eq!(normalized, Some("+12025550173".to_string()));
+/// ```
 pub fn normalize_phone_number(mut phone_number: String) -> Option<String> {
     // normalize the phone number in place to avoid cloning
     normalize_phone_number_in_place(&mut phone_number)
 }
 
+/// Normalizes a phone number in place to E.164 format.
+///
+/// Similar to [`normalize_phone_number`] but modifies the input string
+/// in place for better performance when you already own the string.
+///
+/// # Arguments
+/// * `phone_number` - Mutable reference to the phone number to normalize
+///
+/// # Returns
+/// * `Some(String)` - The normalized phone number in E.164 format
+/// * `None` - If the phone number is invalid
+///
+/// # Examples
+/// ```
+/// use phonelib::normalize_phone_number_in_place;
+///
+/// let mut phone = "12025550173".to_string();
+/// let normalized = normalize_phone_number_in_place(&mut phone);
+/// assert_eq!(normalized, Some("+12025550173".to_string()));
+/// ```
 pub fn normalize_phone_number_in_place(phone_number: &mut String) -> Option<String> {
     remove_unwanted_character(phone_number);
 
     // extract country data
-    let country = extract_country_data(&phone_number)?;
+    let country = extract_country_data(phone_number)?;
 
     // Remove country code from phone number
     let prefix_digits = count_digits(country.prefix);
@@ -832,4 +948,629 @@ fn count_digits(mut n: u32) -> usize {
         n /= 10;
     }
     count
+}
+
+// ============================================================================
+// Text Parsing - Extract phone numbers from free-form text
+// ============================================================================
+
+/// Result of extracting a phone number from text
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedPhoneNumber {
+    /// The phone number as it appeared in the text
+    pub raw: String,
+    /// The normalized E.164 format if valid
+    pub normalized: Option<String>,
+    /// Start position in the original text (byte index)
+    pub start: usize,
+    /// End position in the original text (byte index)
+    pub end: usize,
+    /// Whether the extracted number is valid
+    pub is_valid: bool,
+}
+
+/// Extract all phone numbers from free-form text
+/// 
+/// This function scans text and extracts potential phone numbers in various formats:
+/// - International format: +1 234 567 8901
+/// - With parentheses: (234) 567-8901
+/// - With dashes: 234-567-8901
+/// - With dots: 234.567.8901
+/// - Plain digits: 2345678901
+/// 
+/// # Arguments
+/// * `text` - The text to search for phone numbers
+/// 
+/// # Returns
+/// * `Vec<ExtractedPhoneNumber>` - All phone numbers found in the text
+/// 
+/// # Examples
+/// ```
+/// use phonelib::extract_phone_numbers_from_text;
+/// 
+/// let text = "Call me at +1-202-555-0173 or (415) 555-2671";
+/// let numbers = extract_phone_numbers_from_text(text);
+/// assert_eq!(numbers.len(), 2);
+/// ```
+pub fn extract_phone_numbers_from_text(text: &str) -> Vec<ExtractedPhoneNumber> {
+    let mut results = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    
+    while i < chars.len() {
+        // Look for potential phone number starts
+        if is_phone_number_start(&chars, i) {
+            if let Some((phone_str, start_byte, end_byte)) = extract_phone_candidate(text, &chars, i) {
+                let normalized = normalize_phone_number(phone_str.clone());
+                let is_valid = normalized.is_some();
+                
+                // Only include if it looks like a real phone number (7+ digits)
+                let digit_count = phone_str.chars().filter(|c| c.is_ascii_digit()).count();
+                if digit_count >= 7 {
+                    results.push(ExtractedPhoneNumber {
+                        raw: phone_str,
+                        normalized,
+                        start: start_byte,
+                        end: end_byte,
+                        is_valid,
+                    });
+                    
+                    // Skip past this phone number
+                    i = char_index_from_byte(text, end_byte);
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    
+    results
+}
+
+/// Extract only valid phone numbers from text
+/// 
+/// Similar to `extract_phone_numbers_from_text` but only returns numbers
+/// that pass validation.
+/// 
+/// # Arguments
+/// * `text` - The text to search for phone numbers
+/// 
+/// # Returns
+/// * `Vec<ExtractedPhoneNumber>` - Only valid phone numbers found in the text
+/// 
+/// # Examples
+/// ```
+/// use phonelib::extract_valid_phone_numbers_from_text;
+/// 
+/// let text = "Call +12025550173 or 123 (invalid)";
+/// let numbers = extract_valid_phone_numbers_from_text(text);
+/// // Returns only the valid +12025550173
+/// ```
+pub fn extract_valid_phone_numbers_from_text(text: &str) -> Vec<ExtractedPhoneNumber> {
+    extract_phone_numbers_from_text(text)
+        .into_iter()
+        .filter(|n| n.is_valid)
+        .collect()
+}
+
+/// Extract phone numbers from text with a country hint
+/// 
+/// This function attempts to parse national numbers by assuming
+/// a default country when no country code is present.
+/// 
+/// # Arguments
+/// * `text` - The text to search for phone numbers
+/// * `default_country` - ISO 3166-1 alpha-2 country code to use as default
+/// 
+/// # Returns
+/// * `Vec<ExtractedPhoneNumber>` - Phone numbers found in the text
+/// 
+/// # Examples
+/// ```
+/// use phonelib::extract_phone_numbers_with_country_hint;
+/// 
+/// let text = "Call (202) 555-0173";
+/// let numbers = extract_phone_numbers_with_country_hint(text, "US");
+/// // The number will be normalized as +12025550173
+/// ```
+pub fn extract_phone_numbers_with_country_hint(text: &str, default_country: &str) -> Vec<ExtractedPhoneNumber> {
+    let country = COUNTRIES.iter().find(|c| c.code == default_country);
+    
+    let mut results = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    
+    while i < chars.len() {
+        if is_phone_number_start(&chars, i) {
+            if let Some((phone_str, start_byte, end_byte)) = extract_phone_candidate(text, &chars, i) {
+                let digit_count = phone_str.chars().filter(|c| c.is_ascii_digit()).count();
+                
+                if digit_count >= 7 {
+                    // First try to normalize as-is
+                    let mut normalized = normalize_phone_number(phone_str.clone());
+                    
+                    // If that fails and we have a country hint, try adding country code
+                    if normalized.is_none() {
+                        if let Some(c) = country {
+                            let mut cleaned = phone_str.clone();
+                            remove_non_digit_character(&mut cleaned);
+                            let with_country = format!("+{}{}", c.prefix, cleaned);
+                            normalized = normalize_phone_number(with_country);
+                        }
+                    }
+                    
+                    let is_valid = normalized.is_some();
+                    
+                    results.push(ExtractedPhoneNumber {
+                        raw: phone_str,
+                        normalized,
+                        start: start_byte,
+                        end: end_byte,
+                        is_valid,
+                    });
+                    
+                    i = char_index_from_byte(text, end_byte);
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    
+    results
+}
+
+/// Count how many phone numbers are in the text
+/// 
+/// # Arguments
+/// * `text` - The text to search
+/// 
+/// # Returns
+/// * `usize` - Number of phone numbers found
+pub fn count_phone_numbers_in_text(text: &str) -> usize {
+    extract_phone_numbers_from_text(text).len()
+}
+
+/// Replace phone numbers in text with a placeholder or transformed version
+/// 
+/// # Arguments
+/// * `text` - The text containing phone numbers
+/// * `replacement` - Function that takes an ExtractedPhoneNumber and returns the replacement string
+/// 
+/// # Returns
+/// * `String` - The text with phone numbers replaced
+/// 
+/// # Examples
+/// ```
+/// use phonelib::replace_phone_numbers_in_text;
+/// 
+/// let text = "Call me at +12025550173";
+/// let redacted = replace_phone_numbers_in_text(text, |_| "[REDACTED]".to_string());
+/// assert_eq!(redacted, "Call me at [REDACTED]");
+/// ```
+pub fn replace_phone_numbers_in_text<F>(text: &str, replacement: F) -> String
+where
+    F: Fn(&ExtractedPhoneNumber) -> String,
+{
+    let numbers = extract_phone_numbers_from_text(text);
+    
+    if numbers.is_empty() {
+        return text.to_string();
+    }
+    
+    let mut result = String::with_capacity(text.len());
+    let mut last_end = 0;
+    
+    for number in &numbers {
+        // Add text before this phone number
+        result.push_str(&text[last_end..number.start]);
+        // Add the replacement
+        result.push_str(&replacement(number));
+        last_end = number.end;
+    }
+    
+    // Add remaining text after last phone number
+    result.push_str(&text[last_end..]);
+    
+    result
+}
+
+/// Redact (mask) phone numbers in text for privacy
+/// 
+/// # Arguments
+/// * `text` - The text containing phone numbers
+/// * `visible_digits` - Number of digits to keep visible at the end (0 to hide all)
+/// 
+/// # Returns
+/// * `String` - The text with phone numbers redacted
+/// 
+/// # Examples
+/// ```
+/// use phonelib::redact_phone_numbers;
+/// 
+/// let text = "Call +12025550173";
+/// let redacted = redact_phone_numbers(text, 4);
+/// // Returns "Call ***-***-0173" or similar
+/// ```
+pub fn redact_phone_numbers(text: &str, visible_digits: usize) -> String {
+    replace_phone_numbers_in_text(text, |number| {
+        let digits: Vec<char> = number.raw.chars().filter(|c| c.is_ascii_digit()).collect();
+        let total = digits.len();
+        
+        if visible_digits == 0 || visible_digits >= total {
+            return "[PHONE]".to_string();
+        }
+        
+        let hidden_count = total - visible_digits;
+        let mut result = String::new();
+        
+        for _ in 0..hidden_count {
+            result.push('*');
+        }
+        
+        for &d in &digits[hidden_count..] {
+            result.push(d);
+        }
+        
+        result
+    })
+}
+
+// Helper function to check if position might be start of phone number
+fn is_phone_number_start(chars: &[char], pos: usize) -> bool {
+    if pos >= chars.len() {
+        return false;
+    }
+    
+    let c = chars[pos];
+    
+    // Check for + prefix
+    if c == '+' {
+        return pos + 1 < chars.len() && chars[pos + 1].is_ascii_digit();
+    }
+    
+    // Check for opening parenthesis (area code)
+    if c == '(' {
+        return pos + 1 < chars.len() && chars[pos + 1].is_ascii_digit();
+    }
+    
+    // Check for digit that's not part of a longer number/word
+    if c.is_ascii_digit() {
+        // Make sure it's not in the middle of a word/number
+        if pos > 0 {
+            let prev = chars[pos - 1];
+            if prev.is_alphanumeric() && prev != ' ' && prev != '\n' && prev != '\t' {
+                return false;
+            }
+        }
+        return true;
+    }
+    
+    false
+}
+
+// Helper function to extract a phone number candidate starting at position
+fn extract_phone_candidate(text: &str, chars: &[char], start_pos: usize) -> Option<(String, usize, usize)> {
+    let mut end_pos = start_pos;
+    let mut digit_count = 0;
+    let mut last_digit_pos = start_pos;
+    let mut paren_depth = 0;
+    
+    // Valid phone number characters
+    while end_pos < chars.len() {
+        let c = chars[end_pos];
+        
+        match c {
+            '+' if end_pos == start_pos => {
+                end_pos += 1;
+            }
+            '0'..='9' => {
+                digit_count += 1;
+                last_digit_pos = end_pos;
+                end_pos += 1;
+            }
+            '(' => {
+                paren_depth += 1;
+                end_pos += 1;
+            }
+            ')' if paren_depth > 0 => {
+                paren_depth -= 1;
+                end_pos += 1;
+            }
+            '-' | '.' | ' ' => {
+                // Only allow these if we've seen digits and more might follow
+                if digit_count > 0 && end_pos + 1 < chars.len() && 
+                   (chars[end_pos + 1].is_ascii_digit() || chars[end_pos + 1] == '(') {
+                    end_pos += 1;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+        
+        // Stop if we have too many digits
+        if digit_count > 15 {
+            break;
+        }
+    }
+    
+    if digit_count < 7 {
+        return None;
+    }
+    
+    // Convert char positions to byte positions
+    let start_byte = byte_index_from_char(text, start_pos);
+    let end_byte = byte_index_from_char(text, last_digit_pos + 1);
+    
+    let phone_str = text[start_byte..end_byte].to_string();
+    
+    Some((phone_str, start_byte, end_byte))
+}
+
+// Helper to convert char index to byte index
+fn byte_index_from_char(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len())
+}
+
+// Helper to convert byte index to char index
+fn char_index_from_byte(text: &str, byte_index: usize) -> usize {
+    text[..byte_index].chars().count()
+}
+
+// ============================================================================
+// PhoneNumber struct with equality comparison
+// ============================================================================
+
+/// A parsed and validated phone number with equality comparison
+/// 
+/// Two `PhoneNumber` instances are considered equal if they represent
+/// the same phone number, regardless of their original formatting.
+/// 
+/// # Examples
+/// ```
+/// use phonelib::PhoneNumber;
+/// 
+/// let num1 = PhoneNumber::parse("+12025550173").unwrap();
+/// let num2 = PhoneNumber::parse("12025550173").unwrap();
+/// assert_eq!(num1, num2); // Same number, different formats
+/// ```
+#[derive(Debug, Clone)]
+pub struct PhoneNumber {
+    /// The original input string
+    pub original: String,
+    /// The normalized E.164 format
+    pub normalized: String,
+    /// The country information
+    pub country: Option<&'static Country>,
+    /// The phone number type
+    pub phone_type: Option<PhoneNumberType>,
+}
+
+impl PhoneNumber {
+    /// Parse a string into a PhoneNumber
+    /// 
+    /// # Arguments
+    /// * `input` - The phone number string to parse
+    /// 
+    /// # Returns
+    /// * `Some(PhoneNumber)` - If the input is a valid phone number
+    /// * `None` - If the input is invalid
+    pub fn parse(input: &str) -> Option<Self> {
+        let normalized = normalize_phone_number(input.to_string())?;
+        let country = extract_country(normalized.clone());
+        let phone_type = detect_phone_number_type(normalized.clone());
+        
+        Some(PhoneNumber {
+            original: input.to_string(),
+            normalized,
+            country,
+            phone_type,
+        })
+    }
+    
+    /// Parse a phone number with a country hint for national numbers
+    /// 
+    /// # Arguments
+    /// * `input` - The phone number string to parse
+    /// * `country_code` - ISO 3166-1 alpha-2 country code
+    /// 
+    /// # Returns
+    /// * `Some(PhoneNumber)` - If the input is a valid phone number
+    /// * `None` - If the input is invalid
+    pub fn parse_with_country(input: &str, country_code: &str) -> Option<Self> {
+        // First try parsing as-is
+        if let Some(phone) = Self::parse(input) {
+            return Some(phone);
+        }
+        
+        // Try adding country code
+        let country = COUNTRIES.iter().find(|c| c.code == country_code)?;
+        let mut cleaned = input.to_string();
+        remove_non_digit_character(&mut cleaned);
+        let with_country = format!("+{}{}", country.prefix, cleaned);
+        
+        Self::parse(&with_country).map(|mut phone| {
+            phone.original = input.to_string();
+            phone
+        })
+    }
+    
+    /// Get the E.164 formatted number
+    pub fn e164(&self) -> &str {
+        &self.normalized
+    }
+    
+    /// Get the national number (without country code)
+    pub fn national_number(&self) -> String {
+        if let Some(country) = self.country {
+            let prefix_len = count_digits(country.prefix) + 1; // +1 for '+'
+            self.normalized[prefix_len..].to_string()
+        } else {
+            self.normalized.clone()
+        }
+    }
+    
+    /// Get the country code digits
+    pub fn country_code(&self) -> Option<u32> {
+        self.country.map(|c| c.prefix)
+    }
+    
+    /// Format the phone number
+    pub fn format(&self, format: PhoneFormat) -> String {
+        format_phone_number(self.normalized.clone(), format)
+            .unwrap_or_else(|| self.normalized.clone())
+    }
+    
+    /// Check if this number is mobile
+    pub fn is_mobile(&self) -> bool {
+        self.phone_type == Some(PhoneNumberType::Mobile)
+    }
+    
+    /// Check if this number is a landline
+    pub fn is_landline(&self) -> bool {
+        self.phone_type == Some(PhoneNumberType::FixedLine)
+    }
+    
+    /// Check if this number is toll-free
+    pub fn is_toll_free(&self) -> bool {
+        self.phone_type == Some(PhoneNumberType::TollFree)
+    }
+}
+
+impl PartialEq for PhoneNumber {
+    fn eq(&self, other: &Self) -> bool {
+        self.normalized == other.normalized
+    }
+}
+
+impl Eq for PhoneNumber {}
+
+impl std::hash::Hash for PhoneNumber {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.normalized.hash(state);
+    }
+}
+
+impl std::fmt::Display for PhoneNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.normalized)
+    }
+}
+
+impl std::str::FromStr for PhoneNumber {
+    type Err = &'static str;
+    
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PhoneNumber::parse(s).ok_or("Invalid phone number")
+    }
+}
+
+/// A collection of phone numbers that can be compared and deduplicated
+/// 
+/// This struct provides efficient deduplication and comparison of phone numbers.
+/// 
+/// # Examples
+/// ```
+/// use phonelib::PhoneNumberSet;
+/// 
+/// let mut set = PhoneNumberSet::new();
+/// set.add("+1-202-555-0173");
+/// set.add("(202) 555-0173");
+/// assert_eq!(set.len(), 1); // Same number, different formats
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct PhoneNumberSet {
+    numbers: std::collections::HashMap<String, PhoneNumber>,
+}
+
+impl PhoneNumberSet {
+    /// Create a new empty PhoneNumberSet
+    pub fn new() -> Self {
+        PhoneNumberSet {
+            numbers: std::collections::HashMap::new(),
+        }
+    }
+    
+    /// Add a phone number to the set
+    /// 
+    /// # Returns
+    /// * `true` - If the number was added (not a duplicate)
+    /// * `false` - If the number was already in the set
+    pub fn add(&mut self, phone_number: &str) -> bool {
+        if let Some(phone) = PhoneNumber::parse(phone_number) {
+            if !self.numbers.contains_key(&phone.normalized) {
+                self.numbers.insert(phone.normalized.clone(), phone);
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Check if a phone number is in the set
+    pub fn contains(&self, phone_number: &str) -> bool {
+        if let Some(normalized) = normalize_phone_number(phone_number.to_string()) {
+            self.numbers.contains_key(&normalized)
+        } else {
+            false
+        }
+    }
+    
+    /// Get the number of unique phone numbers
+    pub fn len(&self) -> usize {
+        self.numbers.len()
+    }
+    
+    /// Check if the set is empty
+    pub fn is_empty(&self) -> bool {
+        self.numbers.is_empty()
+    }
+    
+    /// Get all unique phone numbers
+    pub fn iter(&self) -> impl Iterator<Item = &PhoneNumber> {
+        self.numbers.values()
+    }
+    
+    /// Get all normalized phone numbers
+    pub fn normalized_numbers(&self) -> Vec<&str> {
+        self.numbers.keys().map(|s| s.as_str()).collect()
+    }
+    
+    /// Remove a phone number from the set
+    pub fn remove(&mut self, phone_number: &str) -> bool {
+        if let Some(normalized) = normalize_phone_number(phone_number.to_string()) {
+            self.numbers.remove(&normalized).is_some()
+        } else {
+            false
+        }
+    }
+    
+    /// Find all duplicates of a phone number (different formats)
+    pub fn find_duplicates(&self, phone_number: &str) -> Option<&PhoneNumber> {
+        let normalized = normalize_phone_number(phone_number.to_string())?;
+        self.numbers.get(&normalized)
+    }
+}
+
+impl FromIterator<String> for PhoneNumberSet {
+    fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
+        let mut set = PhoneNumberSet::new();
+        for number in iter {
+            set.add(&number);
+        }
+        set
+    }
+}
+
+impl<'a> FromIterator<&'a str> for PhoneNumberSet {
+    fn from_iter<I: IntoIterator<Item = &'a str>>(iter: I) -> Self {
+        let mut set = PhoneNumberSet::new();
+        for number in iter {
+            set.add(number);
+        }
+        set
+    }
 }

@@ -1,25 +1,37 @@
 [package]
 name = "phonelib"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
+rust-version = "1.70"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 repository = "https://github.com/mohamadzoh/phonelib"
-description = "A library that helps you work with phone numbers"
+homepage = "https://github.com/mohamadzoh/phonelib"
+documentation = "https://docs.rs/phonelib"
+description = "A comprehensive library for phone number validation, formatting, parsing, and manipulation"
 license = "MIT"
-keywords = ["phone", "validate", "libphonenumber-rs", "phonelib","number"]
+readme = "README.md"
+keywords = ["phone", "validation", "phonenumber", "e164", "international"]
+categories = ["internationalization", "text-processing", "parsing"]
+include = [
+    "src/**/*",
+    "benches/**/*",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+]
 
 [lib]
 name = "phonelib"
 path = "src/lib.rs"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-# Add your dependencies here
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8.1"
 
 [[bench]]
 name = "phone_benchmark"
 harness = false
+
+[badges]
+maintenance = { status = "actively-developed" }

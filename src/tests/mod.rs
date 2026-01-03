@@ -1063,4 +1063,278 @@ mod tests {
             assert!(ptype == PhoneNumberType::Mobile || ptype == PhoneNumberType::Unknown);
         }
     }
+
+    // ========================================================================
+    // Text Parsing Tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_phone_numbers_from_text() {
+        use crate::extract_phone_numbers_from_text;
+        
+        let text = "Call me at +12025550173 or +442079460958 for support.";
+        let numbers = extract_phone_numbers_from_text(text);
+        
+        assert_eq!(numbers.len(), 2);
+        assert!(numbers[0].raw.contains("12025550173"));
+        assert!(numbers[1].raw.contains("442079460958"));
+    }
+
+    #[test]
+    fn test_extract_phone_with_various_formats() {
+        use crate::extract_phone_numbers_from_text;
+        
+        let text = "Numbers: (202) 555-0173, 202.555.0174, 202-555-0175";
+        let numbers = extract_phone_numbers_from_text(text);
+        
+        // Should find multiple number patterns
+        assert!(!numbers.is_empty());
+    }
+
+    #[test]
+    fn test_extract_valid_phone_numbers_only() {
+        use crate::extract_valid_phone_numbers_from_text;
+        
+        let text = "Valid: +12025550173, Invalid: 123";
+        let numbers = extract_valid_phone_numbers_from_text(text);
+        
+        // Should only return valid numbers
+        for num in &numbers {
+            assert!(num.is_valid);
+        }
+    }
+
+    #[test]
+    fn test_extract_with_country_hint() {
+        use crate::extract_phone_numbers_with_country_hint;
+        
+        let text = "Call (202) 555-0173";
+        let numbers = extract_phone_numbers_with_country_hint(text, "US");
+        
+        assert!(!numbers.is_empty());
+        // With US hint, national number should be recognized
+    }
+
+    #[test]
+    fn test_count_phone_numbers() {
+        use crate::count_phone_numbers_in_text;
+        
+        let text = "Contact: +12025550173, +442079460958";
+        let count = count_phone_numbers_in_text(text);
+        
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_replace_phone_numbers() {
+        use crate::replace_phone_numbers_in_text;
+        
+        let text = "Call +12025550173 today!";
+        let replaced = replace_phone_numbers_in_text(text, |_| "[PHONE]".to_string());
+        
+        assert!(replaced.contains("[PHONE]"));
+        assert!(!replaced.contains("12025550173"));
+    }
+
+    #[test]
+    fn test_redact_phone_numbers() {
+        use crate::redact_phone_numbers;
+        
+        let text = "Call +12025550173";
+        let redacted = redact_phone_numbers(text, 4);
+        
+        // Should have stars and visible digits
+        assert!(redacted.contains("*") || redacted.contains("[PHONE]"));
+    }
+
+    #[test]
+    fn test_extract_positions() {
+        use crate::extract_phone_numbers_from_text;
+        
+        let text = "Phone: +12025550173";
+        let numbers = extract_phone_numbers_from_text(text);
+        
+        if !numbers.is_empty() {
+            let num = &numbers[0];
+            // Verify positions make sense
+            assert!(num.start < num.end);
+            assert!(num.end <= text.len());
+        }
+    }
+
+    // ========================================================================
+    // PhoneNumber Struct and Equality Tests
+    // ========================================================================
+
+    #[test]
+    fn test_phone_number_struct_parse() {
+        use crate::PhoneNumber as PhoneNum;
+        
+        let phone = PhoneNum::parse("+12025550173");
+        assert!(phone.is_some());
+        
+        let phone = phone.unwrap();
+        assert_eq!(phone.e164(), "+12025550173");
+    }
+
+    #[test]
+    fn test_phone_number_equality_trait() {
+        use crate::PhoneNumber as PhoneNum;
+        
+        let num1 = PhoneNum::parse("+12025550173").unwrap();
+        let num2 = PhoneNum::parse("12025550173").unwrap();
+        let num3 = PhoneNum::parse("+442079460958").unwrap();
+        
+        // Same number, different formats should be equal
+        assert_eq!(num1, num2);
+        // Different numbers should not be equal
+        assert_ne!(num1, num3);
+    }
+
+    #[test]
+    fn test_phone_number_hash() {
+        use crate::PhoneNumber as PhoneNum;
+        use std::collections::HashSet;
+        
+        let mut set = HashSet::new();
+        
+        let num1 = PhoneNum::parse("+12025550173").unwrap();
+        let num2 = PhoneNum::parse("12025550173").unwrap();
+        
+        set.insert(num1);
+        set.insert(num2); // Should not add duplicate
+        
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_phone_number_with_country_hint() {
+        use crate::PhoneNumber as PhoneNum;
+        
+        // National number with country hint
+        let phone = PhoneNum::parse_with_country("2025550173", "US");
+        
+        if let Some(p) = phone {
+            assert!(p.e164().starts_with("+1"));
+        }
+    }
+
+    #[test]
+    fn test_phone_number_national_number() {
+        use crate::PhoneNumber as PhoneNum;
+        
+        let phone = PhoneNum::parse("+12025550173").unwrap();
+        let national = phone.national_number();
+        
+        // National number should not include country code
+        assert!(!national.starts_with("+"));
+        assert!(!national.starts_with("1") || national.len() < 11);
+    }
+
+    #[test]
+    fn test_phone_number_format_method() {
+        use crate::PhoneNumber as PhoneNum;
+        use crate::PhoneFormat;
+        
+        let phone = PhoneNum::parse("+12025550173").unwrap();
+        
+        let e164 = phone.format(PhoneFormat::E164);
+        assert!(e164.starts_with("+"));
+    }
+
+    #[test]
+    fn test_phone_number_display() {
+        use crate::PhoneNumber as PhoneNum;
+        
+        let phone = PhoneNum::parse("+12025550173").unwrap();
+        let display = format!("{}", phone);
+        
+        assert_eq!(display, "+12025550173");
+    }
+
+    #[test]
+    fn test_phone_number_from_str() {
+        use crate::PhoneNumber as PhoneNum;
+        
+        let phone: Result<PhoneNum, _> = "+12025550173".parse();
+        assert!(phone.is_ok());
+        
+        let invalid: Result<PhoneNum, _> = "invalid".parse();
+        assert!(invalid.is_err());
+    }
+
+    // ========================================================================
+    // PhoneNumberSet Tests
+    // ========================================================================
+
+    #[test]
+    fn test_phone_number_set_basic() {
+        use crate::PhoneNumberSet;
+        
+        let mut set = PhoneNumberSet::new();
+        
+        assert!(set.add("+12025550173"));
+        assert!(!set.add("12025550173")); // Duplicate
+        
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_phone_number_set_contains() {
+        use crate::PhoneNumberSet;
+        
+        let mut set = PhoneNumberSet::new();
+        set.add("+12025550173");
+        
+        assert!(set.contains("+12025550173"));
+        assert!(set.contains("12025550173")); // Same number, different format
+        assert!(!set.contains("+442079460958"));
+    }
+
+    #[test]
+    fn test_phone_number_set_remove() {
+        use crate::PhoneNumberSet;
+        
+        let mut set = PhoneNumberSet::new();
+        set.add("+12025550173");
+        
+        assert!(set.remove("12025550173")); // Remove using different format
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn test_phone_number_set_from_iterator() {
+        use crate::PhoneNumberSet;
+        
+        let numbers = vec!["+12025550173", "12025550173", "+442079460958"];
+        let set: PhoneNumberSet = numbers.into_iter().collect();
+        
+        assert_eq!(set.len(), 2); // First two are duplicates
+    }
+
+    #[test]
+    fn test_phone_number_set_iter() {
+        use crate::PhoneNumberSet;
+        
+        let mut set = PhoneNumberSet::new();
+        set.add("+12025550173");
+        set.add("+442079460958");
+        
+        let count = set.iter().count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_phone_number_type_checks() {
+        use crate::PhoneNumber as PhoneNum;
+        
+        // These tests depend on the type detection logic
+        let phone = PhoneNum::parse("+18005551234"); // US toll-free pattern
+        if let Some(p) = phone {
+            // Just verify the methods work
+            let _ = p.is_mobile();
+            let _ = p.is_landline();
+            let _ = p.is_toll_free();
+        }
+    }
 }
