@@ -2,7 +2,7 @@ use crate::definitions;
 
 use definitions::Country;
 
-pub const COUNTRIES: [Country; 246] = [
+pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Andorra",
         code: "AD",
@@ -338,6 +338,12 @@ pub const COUNTRIES: [Country; 246] = [
         code: "CY",
         phone_lengths: &[8],
         prefix: 357,
+    },
+    Country {
+        name: "Cymru",
+        code: "GB-CYM",
+        phone_lengths: &[10],
+        prefix: 44,
     },
     Country {
         name: "Czech Republic",
