@@ -1,6 +1,6 @@
 [package]
 name = "phonelib"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]

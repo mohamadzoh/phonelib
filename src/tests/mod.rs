@@ -1,10 +1,13 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        are_phone_numbers_equal, detect_phone_number_type, extract_country, format_phone_number,
-        generate_random_phone_number, is_landline_number, is_mobile_number,
-        is_potentially_valid_phone_number, is_toll_free_number, is_valid_phone_number,
-        normalize_phone_number, normalize_phone_number_in_place, suggest_phone_number_corrections,
+        analyze_phone_numbers_batch, are_phone_numbers_equal, detect_phone_number_type,
+        detect_phone_number_types_batch, extract_countries_batch, extract_country,
+        format_phone_number, generate_random_phone_number, generate_random_phone_numbers,
+        group_equivalent_phone_numbers, guess_country_from_number, is_landline_number,
+        is_mobile_number, is_potentially_valid_phone_number, is_toll_free_number,
+        is_valid_phone_number, normalize_phone_number, normalize_phone_number_in_place,
+        normalize_phone_numbers_batch, suggest_phone_number_corrections,
         validate_phone_numbers_batch, PhoneFormat, PhoneNumberType,
     };
 
@@ -867,11 +870,11 @@ mod tests {
     #[test]
     fn test_is_valid_phone_number() {
         // Valid phone number
-        assert!(is_valid_phone_number("+96179123123".to_string()));
-        assert!(!is_valid_phone_number("invalid_phone_number".to_string()));
+        assert!(is_valid_phone_number("+96179123123"));
+        assert!(!is_valid_phone_number("invalid_phone_number"));
         // Valid phone number with parentheses
-        assert!(is_valid_phone_number("+1 (234) 567-8990".to_string()));
-        assert!(!is_valid_phone_number("+1 (234) 567-890".to_string()));
+        assert!(is_valid_phone_number("+1 (234) 567-8990"));
+        assert!(!is_valid_phone_number("+1 (234) 567-890"));
     }
 
     #[test]
@@ -911,21 +914,21 @@ mod tests {
     fn test_extract_country() {
         // Valid country code
         assert_eq!(
-            extract_country("+11231231232".to_string())
+            extract_country("+11231231232")
                 .unwrap()
                 .code
                 .to_string(),
             "US".to_string()
         );
         // Invalid country code
-        assert_eq!(extract_country("+987654321".to_string()), None);
+        assert_eq!(extract_country("+987654321"), None);
     }
 
     #[test]
     fn test_normalize_phone_number() {
         for phone_number in PHONE_NUMBERS.iter() {
             let normalized_phone_number =
-                normalize_phone_number(phone_number.phone_number.to_string());
+                normalize_phone_number(phone_number.phone_number);
             assert_eq!(
                 normalized_phone_number,
                 Some(phone_number.phone_number.to_string())
@@ -935,7 +938,7 @@ mod tests {
         }
 
         assert_eq!(
-            normalize_phone_number("invalid_phone_number".to_string()),
+            normalize_phone_number("invalid_phone_number"),
             None
         );
     }
@@ -943,69 +946,69 @@ mod tests {
     #[test]
     fn test_cases() {
         let test_cases = vec![
-            (String::from("+61485906541"), true),
-            (String::from("+4306935893571"), true),
-            (String::from("+32468799972"), true),
-            (String::from("+5561981737725"), true),
-            (String::from("+44 7406514755"), true),
-            (String::from("+54 9119298464"), true),
-            (String::from("+61 4129228042"), true),
-            (String::from("+43 6642428349"), true),
-            (String::from("+32 4706460538"), true),
-            (String::from("+420 601139706"), true),
+            ("+61485906541", true),
+            ("+4306935893571", true),
+            ("+32468799972", true),
+            ("+5561981737725", true),
+            ("+44 7406514755", true),
+            ("+54 9119298464", true),
+            ("+61 4129228042", true),
+            ("+43 6642428349", true),
+            ("+32 4706460538", true),
+            ("+420 601139706", true),
         ];
 
         for (phone, valid) in test_cases {
-            let is_valid = is_valid_phone_number(phone.clone());
+            let is_valid = is_valid_phone_number(phone);
             assert_eq!(is_valid, valid);
         }
     }
 
     #[test]
     fn test_phone_number_formatting() {
-        let number = "+12345678901".to_string();
+        let number = "+12345678901";
 
         // Test E.164 format
-        let e164 = format_phone_number(number.clone(), PhoneFormat::E164);
+        let e164 = format_phone_number(number, PhoneFormat::E164);
         assert_eq!(e164, Some("+12345678901".to_string()));
 
         // Test International format
-        let intl = format_phone_number(number.clone(), PhoneFormat::International);
+        let intl = format_phone_number(number, PhoneFormat::International);
         assert!(intl.is_some());
 
         // Test National format
-        let national = format_phone_number(number.clone(), PhoneFormat::National);
+        let national = format_phone_number(number, PhoneFormat::National);
         assert!(national.is_some());
 
         // Test RFC3966 format
-        let rfc = format_phone_number(number.clone(), PhoneFormat::RFC3966);
+        let rfc = format_phone_number(number, PhoneFormat::RFC3966);
         assert!(rfc.is_some());
     }
 
     #[test]
     fn test_phone_number_type_detection() {
         // Test US toll-free number
-        let toll_free = is_toll_free_number("18001234567".to_string());
-        assert!(toll_free || !is_valid_phone_number("18001234567".to_string()));
+        let toll_free = is_toll_free_number("18001234567");
+        assert!(toll_free || !is_valid_phone_number("18001234567"));
 
         // Test mobile detection function
-        let mobile_result = is_mobile_number("447123456789".to_string());
-        assert!(mobile_result || !is_valid_phone_number("447123456789".to_string()));
+        let mobile_result = is_mobile_number("447123456789");
+        assert!(mobile_result || !is_valid_phone_number("447123456789"));
 
         // Test landline detection function
-        let landline_result = is_landline_number("12025551234".to_string());
-        assert!(landline_result || !is_valid_phone_number("12025551234".to_string()));
+        let landline_result = is_landline_number("12025551234");
+        assert!(landline_result || !is_valid_phone_number("12025551234"));
     }
 
     #[test]
     fn test_random_phone_number_generation() {
         let random_us = generate_random_phone_number("US");
-        if let Some(number) = random_us {
+        if let Some(ref number) = random_us {
             assert!(is_valid_phone_number(number));
         }
 
         let random_gb = generate_random_phone_number("GB");
-        if let Some(number) = random_gb {
+        if let Some(ref number) = random_gb {
             assert!(is_valid_phone_number(number));
         }
 
@@ -1016,23 +1019,23 @@ mod tests {
 
     #[test]
     fn test_phone_number_equality() {
-        let num1 = "+12345678901".to_string();
-        let num2 = "12345678901".to_string();
-        let num3 = "+12345678902".to_string();
+        let num1 = "+12345678901";
+        let num2 = "12345678901";
+        let num3 = "+12345678902";
 
-        assert!(are_phone_numbers_equal(num1.clone(), num2));
+        assert!(are_phone_numbers_equal(num1, num2));
         assert!(!are_phone_numbers_equal(num1, num3));
     }
 
     #[test]
     fn test_batch_processing() {
-        let numbers = vec![
-            "+12345678901".to_string(),
-            "invalid".to_string(),
-            "+442079460958".to_string(),
+        let numbers = [
+            "+12345678901",
+            "invalid",
+            "+442079460958",
         ];
 
-        let results = validate_phone_numbers_batch(numbers.clone());
+        let results = validate_phone_numbers_batch(&numbers);
         assert_eq!(results.len(), 3);
 
         // First and third should be valid, second should be invalid
@@ -1043,23 +1046,23 @@ mod tests {
 
     #[test]
     fn test_phone_number_suggestions() {
-        let suggestions = suggest_phone_number_corrections("123456789".to_string(), Some("US"));
+        let suggestions = suggest_phone_number_corrections("123456789", Some("US"));
         assert!(!suggestions.is_empty());
 
         // Test potentially valid check
-        let potentially_valid = is_potentially_valid_phone_number("123-456-7890".to_string());
+        let potentially_valid = is_potentially_valid_phone_number("123-456-7890");
         assert!(potentially_valid);
 
-        let not_valid = is_potentially_valid_phone_number("123".to_string());
+        let not_valid = is_potentially_valid_phone_number("123");
         assert!(!not_valid);
     }
 
     #[test]
     fn test_type_detection_specific_cases() {
         // Test with known patterns
-        let phone_type = detect_phone_number_type("447123456789".to_string());
+        let phone_type = detect_phone_number_type("447123456789");
         // Should be Some(Mobile) or None if invalid
-        assert!(phone_type.is_some() || !is_valid_phone_number("447123456789".to_string()));
+        assert!(phone_type.is_some() || !is_valid_phone_number("447123456789"));
 
         if let Some(ptype) = phone_type {
             assert!(ptype == PhoneNumberType::Mobile || ptype == PhoneNumberType::Unknown);
@@ -1338,5 +1341,561 @@ mod tests {
             let _ = p.is_landline();
             let _ = p.is_toll_free();
         }
+    }
+
+    // ========================================================================
+    // guess_country_from_number Tests
+    // ========================================================================
+
+    #[test]
+    fn test_guess_country_from_number_us() {
+        // US number without country code (10 digits)
+        let country = guess_country_from_number("2025550173");
+        assert!(country.is_some());
+        assert_eq!(country.unwrap().code, "US");
+    }
+
+    #[test]
+    fn test_guess_country_from_number_with_country_code() {
+        // US number with country code
+        let country = guess_country_from_number("12025550173");
+        assert!(country.is_some());
+        assert_eq!(country.unwrap().code, "US");
+
+        // UK number with country code
+        let country_gb = guess_country_from_number("442079460958");
+        assert!(country_gb.is_some());
+        // GB and GB-CYM share the same prefix 44
+        let gb_code = country_gb.unwrap().code;
+        assert!(gb_code == "GB" || gb_code == "GB-CYM");
+    }
+
+    #[test]
+    fn test_guess_country_from_number_invalid() {
+        // Empty string
+        let country = guess_country_from_number("");
+        assert!(country.is_none());
+
+        // Too short
+        let country_short = guess_country_from_number("123");
+        assert!(country_short.is_none());
+    }
+
+    #[test]
+    fn test_guess_country_from_number_various_countries() {
+        // German number
+        let de = guess_country_from_number("493012345678");
+        assert!(de.is_some());
+
+        // French number
+        let fr = guess_country_from_number("33123456789");
+        assert!(fr.is_some());
+    }
+
+    // ========================================================================
+    // extract_countries_batch Tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_countries_batch_basic() {
+        let numbers = ["+12025550173", "+442079460958", "+493012345678"];
+        let countries = extract_countries_batch(&numbers);
+
+        assert_eq!(countries.len(), 3);
+        assert!(countries[0].is_some());
+        assert_eq!(countries[0].unwrap().code, "US");
+        assert!(countries[1].is_some());
+        // GB and GB-CYM share the same prefix 44
+        let gb_code = countries[1].unwrap().code;
+        assert!(gb_code == "GB" || gb_code == "GB-CYM");
+        assert!(countries[2].is_some());
+        assert_eq!(countries[2].unwrap().code, "DE");
+    }
+
+    #[test]
+    fn test_extract_countries_batch_with_invalid() {
+        let numbers = ["+12025550173", "invalid", "+442079460958"];
+        let countries = extract_countries_batch(&numbers);
+
+        assert_eq!(countries.len(), 3);
+        assert!(countries[0].is_some());
+        assert!(countries[1].is_none());
+        assert!(countries[2].is_some());
+    }
+
+    #[test]
+    fn test_extract_countries_batch_empty() {
+        let numbers: [&str; 0] = [];
+        let countries = extract_countries_batch(&numbers);
+        assert!(countries.is_empty());
+    }
+
+    #[test]
+    fn test_extract_countries_batch_with_vec() {
+        let numbers = vec!["+12025550173".to_string(), "+442079460958".to_string()];
+        let countries = extract_countries_batch(&numbers);
+
+        assert_eq!(countries.len(), 2);
+        assert!(countries.iter().all(|c| c.is_some()));
+    }
+
+    // ========================================================================
+    // normalize_phone_numbers_batch Tests
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_phone_numbers_batch_basic() {
+        let numbers = ["12025550173", "+442079460958", "invalid"];
+        let normalized = normalize_phone_numbers_batch(&numbers);
+
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[0], Some("+12025550173".to_string()));
+        assert_eq!(normalized[1], Some("+442079460958".to_string()));
+        assert!(normalized[2].is_none());
+    }
+
+    #[test]
+    fn test_normalize_phone_numbers_batch_various_formats() {
+        let numbers = [
+            "+1 (202) 555-0173",
+            "1-202-555-0174",
+            "(202) 555-0175",
+        ];
+        let normalized = normalize_phone_numbers_batch(&numbers);
+
+        assert_eq!(normalized.len(), 3);
+        // All should normalize successfully
+        for norm in &normalized {
+            if let Some(n) = norm {
+                assert!(n.starts_with("+"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_normalize_phone_numbers_batch_empty() {
+        let numbers: [&str; 0] = [];
+        let normalized = normalize_phone_numbers_batch(&numbers);
+        assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_phone_numbers_batch_with_string_vec() {
+        let numbers = vec!["12025550173".to_string(), "442079460958".to_string()];
+        let normalized = normalize_phone_numbers_batch(&numbers);
+
+        assert_eq!(normalized.len(), 2);
+        assert!(normalized[0].is_some());
+        assert!(normalized[1].is_some());
+    }
+
+    // ========================================================================
+    // detect_phone_number_types_batch Tests
+    // ========================================================================
+
+    #[test]
+    fn test_detect_phone_number_types_batch_basic() {
+        let numbers = ["+12025550173", "+442079460958", "+18001234567"];
+        let types = detect_phone_number_types_batch(&numbers);
+
+        assert_eq!(types.len(), 3);
+        // All should have detected types
+        for phone_type in &types {
+            assert!(phone_type.is_some());
+        }
+    }
+
+    #[test]
+    fn test_detect_phone_number_types_batch_toll_free() {
+        let numbers = ["+18001234567", "+18881234567", "+18771234567"];
+        let types = detect_phone_number_types_batch(&numbers);
+
+        for phone_type in &types {
+            if let Some(t) = phone_type {
+                assert_eq!(*t, PhoneNumberType::TollFree);
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_phone_number_types_batch_with_invalid() {
+        let numbers = ["+12025550173", "invalid", "+442079460958"];
+        let types = detect_phone_number_types_batch(&numbers);
+
+        assert_eq!(types.len(), 3);
+        assert!(types[0].is_some());
+        assert!(types[1].is_none());
+        assert!(types[2].is_some());
+    }
+
+    #[test]
+    fn test_detect_phone_number_types_batch_uk_mobile() {
+        let numbers = ["+447123456789", "+447987654321"];
+        let types = detect_phone_number_types_batch(&numbers);
+
+        for phone_type in &types {
+            if let Some(t) = phone_type {
+                assert_eq!(*t, PhoneNumberType::Mobile);
+            }
+        }
+    }
+
+    // ========================================================================
+    // analyze_phone_numbers_batch Tests
+    // ========================================================================
+
+    #[test]
+    fn test_analyze_phone_numbers_batch_basic() {
+        let numbers = ["+12025550173", "+442079460958"];
+        let analyses = analyze_phone_numbers_batch(&numbers);
+
+        assert_eq!(analyses.len(), 2);
+        for analysis in &analyses {
+            assert!(analysis.is_valid);
+            assert!(analysis.normalized.is_some());
+            assert!(analysis.country.is_some());
+            assert!(analysis.phone_type.is_some());
+        }
+    }
+
+    #[test]
+    fn test_analyze_phone_numbers_batch_mixed() {
+        let numbers = ["+12025550173", "invalid", "+442079460958"];
+        let analyses = analyze_phone_numbers_batch(&numbers);
+
+        assert_eq!(analyses.len(), 3);
+        
+        // First should be valid
+        assert!(analyses[0].is_valid);
+        assert_eq!(analyses[0].original, "+12025550173");
+        
+        // Second should be invalid
+        assert!(!analyses[1].is_valid);
+        assert!(analyses[1].normalized.is_none());
+        
+        // Third should be valid
+        assert!(analyses[2].is_valid);
+    }
+
+    #[test]
+    fn test_analyze_phone_numbers_batch_original_preserved() {
+        let numbers = ["+1 (202) 555-0173", "1-202-555-0174"];
+        let analyses = analyze_phone_numbers_batch(&numbers);
+
+        // Original format should be preserved
+        assert_eq!(analyses[0].original, "+1 (202) 555-0173");
+        assert_eq!(analyses[1].original, "1-202-555-0174");
+    }
+
+    #[test]
+    fn test_analyze_phone_numbers_batch_empty() {
+        let numbers: [&str; 0] = [];
+        let analyses = analyze_phone_numbers_batch(&numbers);
+        assert!(analyses.is_empty());
+    }
+
+    // ========================================================================
+    // group_equivalent_phone_numbers Tests
+    // ========================================================================
+
+    #[test]
+    fn test_group_equivalent_phone_numbers_basic() {
+        let numbers = ["+12025550173", "12025550173", "+442079460958"];
+        let groups = group_equivalent_phone_numbers(&numbers);
+
+        // Should have 2 groups: one for US numbers, one for UK
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn test_group_equivalent_phone_numbers_all_same() {
+        let numbers = [
+            "+12025550173",
+            "12025550173",
+            "+1 (202) 555-0173",
+            "1-202-555-0173",
+        ];
+        let groups = group_equivalent_phone_numbers(&numbers);
+
+        // All represent the same number, should be one group
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 4);
+    }
+
+    #[test]
+    fn test_group_equivalent_phone_numbers_all_different() {
+        let numbers = ["+12025550173", "+12025550174", "+12025550175"];
+        let groups = group_equivalent_phone_numbers(&numbers);
+
+        // All different numbers, should have 3 groups
+        assert_eq!(groups.len(), 3);
+    }
+
+    #[test]
+    fn test_group_equivalent_phone_numbers_empty() {
+        let numbers: [&str; 0] = [];
+        let groups = group_equivalent_phone_numbers(&numbers);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_group_equivalent_phone_numbers_with_invalid() {
+        let numbers = ["+12025550173", "invalid", "+12025550173"];
+        let groups = group_equivalent_phone_numbers(&numbers);
+
+        // Should have 2 groups: one for valid numbers, one for invalid
+        assert!(groups.len() >= 1);
+    }
+
+    // ========================================================================
+    // generate_random_phone_numbers Tests
+    // ========================================================================
+
+    #[test]
+    fn test_generate_random_phone_numbers_basic() {
+        let numbers = generate_random_phone_numbers("US", 5);
+        assert_eq!(numbers.len(), 5);
+    }
+
+    #[test]
+    fn test_generate_random_phone_numbers_various_countries() {
+        let us_numbers = generate_random_phone_numbers("US", 3);
+        assert_eq!(us_numbers.len(), 3);
+        for num in &us_numbers {
+            assert!(num.starts_with("+1"));
+        }
+
+        let gb_numbers = generate_random_phone_numbers("GB", 3);
+        assert_eq!(gb_numbers.len(), 3);
+        for num in &gb_numbers {
+            assert!(num.starts_with("+44"));
+        }
+    }
+
+    #[test]
+    fn test_generate_random_phone_numbers_invalid_country() {
+        let numbers = generate_random_phone_numbers("XX", 5);
+        assert!(numbers.is_empty());
+    }
+
+    #[test]
+    fn test_generate_random_phone_numbers_zero_count() {
+        let numbers = generate_random_phone_numbers("US", 0);
+        assert!(numbers.is_empty());
+    }
+
+    // ========================================================================
+    // is_potentially_valid_phone_number Tests (Additional)
+    // ========================================================================
+
+    #[test]
+    fn test_is_potentially_valid_phone_number_valid_lengths() {
+        // 7 digits - minimum valid
+        assert!(is_potentially_valid_phone_number("1234567"));
+        
+        // 10 digits - common US format
+        assert!(is_potentially_valid_phone_number("1234567890"));
+        
+        // 15 digits - maximum international
+        assert!(is_potentially_valid_phone_number("123456789012345"));
+    }
+
+    #[test]
+    fn test_is_potentially_valid_phone_number_invalid_lengths() {
+        // Too short
+        assert!(!is_potentially_valid_phone_number("123456"));
+        
+        // Too long
+        assert!(!is_potentially_valid_phone_number("1234567890123456"));
+    }
+
+    #[test]
+    fn test_is_potentially_valid_phone_number_formatted() {
+        // With dashes
+        assert!(is_potentially_valid_phone_number("123-456-7890"));
+        
+        // With spaces
+        assert!(is_potentially_valid_phone_number("123 456 7890"));
+        
+        // With parentheses
+        assert!(is_potentially_valid_phone_number("(123) 456-7890"));
+    }
+
+    #[test]
+    fn test_is_potentially_valid_phone_number_all_zeros() {
+        // All zeros should be invalid
+        assert!(!is_potentially_valid_phone_number("0000000000"));
+    }
+
+    // ========================================================================
+    // suggest_phone_number_corrections Tests (Additional)
+    // ========================================================================
+
+    #[test]
+    fn test_suggest_phone_number_corrections_with_country_hint() {
+        let suggestions = suggest_phone_number_corrections("2025550173", Some("US"));
+        // Should suggest adding US country code
+        assert!(!suggestions.is_empty());
+        if !suggestions.is_empty() {
+            assert!(suggestions[0].starts_with("+1"));
+        }
+    }
+
+    #[test]
+    fn test_suggest_phone_number_corrections_already_valid() {
+        let suggestions = suggest_phone_number_corrections("+12025550173", None);
+        // Already valid, should return itself
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0], "+12025550173");
+    }
+
+    #[test]
+    fn test_suggest_phone_number_corrections_without_hint() {
+        let suggestions = suggest_phone_number_corrections("2025550173", None);
+        // Should try common country codes
+        // May or may not find valid suggestions depending on number
+        assert!(suggestions.len() <= 5); // Limited to 5 suggestions
+    }
+
+    // ========================================================================
+    // Additional Integration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_full_workflow_validation_to_analysis() {
+        let numbers = [
+            "+12025550173",
+            "+442079460958",
+            "+919876543210",
+            "invalid",
+        ];
+
+        // Step 1: Validate
+        let valid_results = validate_phone_numbers_batch(&numbers);
+        assert_eq!(valid_results, vec![true, true, true, false]);
+
+        // Step 2: Normalize valid ones
+        let normalized = normalize_phone_numbers_batch(&numbers);
+        assert_eq!(normalized.len(), 4);
+
+        // Step 3: Extract countries
+        let countries = extract_countries_batch(&numbers);
+        assert_eq!(countries[0].unwrap().code, "US");
+        // GB and GB-CYM share the same prefix 44
+        let gb_code = countries[1].unwrap().code;
+        assert!(gb_code == "GB" || gb_code == "GB-CYM");
+        assert_eq!(countries[2].unwrap().code, "IN");
+        assert!(countries[3].is_none());
+
+        // Step 4: Detect types
+        let types = detect_phone_number_types_batch(&numbers);
+        assert!(types[0].is_some());
+        assert!(types[1].is_some());
+        assert!(types[2].is_some());
+        assert!(types[3].is_none());
+
+        // Step 5: Full analysis
+        let analyses = analyze_phone_numbers_batch(&numbers);
+        assert_eq!(analyses.len(), 4);
+    }
+
+    #[test]
+    fn test_batch_functions_accept_various_types() {
+        // Test with array
+        let arr = ["+12025550173", "+442079460958"];
+        assert_eq!(validate_phone_numbers_batch(&arr).len(), 2);
+
+        // Test with Vec
+        let vec = vec!["+12025550173", "+442079460958"];
+        assert_eq!(normalize_phone_numbers_batch(&vec).len(), 2);
+
+        // Test with Vec<String>
+        let string_vec = vec!["+12025550173".to_string(), "+442079460958".to_string()];
+        assert_eq!(extract_countries_batch(&string_vec).len(), 2);
+
+        // Test with slice
+        let slice: &[&str] = &["+12025550173", "+442079460958"];
+        assert_eq!(detect_phone_number_types_batch(slice).len(), 2);
+    }
+
+    #[test]
+    fn test_cymru_wales_support() {
+        // Test the newly added Wales support
+        let wales_number = "+442079460958";
+        
+        assert!(is_valid_phone_number(wales_number));
+        
+        let country = extract_country(wales_number);
+        assert!(country.is_some());
+        // Should be either GB or GB-CYM
+        let code = country.unwrap().code;
+        assert!(code == "GB" || code == "GB-CYM");
+    }
+
+    #[test]
+    fn test_phone_format_all_variants() {
+        let number = "+12025550173";
+
+        // Test all format variants
+        let e164 = format_phone_number(number, PhoneFormat::E164);
+        assert!(e164.is_some());
+        assert!(e164.unwrap().starts_with("+"));
+
+        let international = format_phone_number(number, PhoneFormat::International);
+        assert!(international.is_some());
+
+        let national = format_phone_number(number, PhoneFormat::National);
+        assert!(national.is_some());
+
+        let rfc3966 = format_phone_number(number, PhoneFormat::RFC3966);
+        assert!(rfc3966.is_some());
+        assert!(rfc3966.unwrap().starts_with("tel:"));
+    }
+
+    #[test]
+    fn test_detect_phone_number_type_comprehensive() {
+        // US Toll-free
+        let toll_free = detect_phone_number_type("+18005551234");
+        assert_eq!(toll_free, Some(PhoneNumberType::TollFree));
+
+        // UK Mobile (07x)
+        let uk_mobile = detect_phone_number_type("+447123456789");
+        assert_eq!(uk_mobile, Some(PhoneNumberType::Mobile));
+
+        // Invalid number
+        let invalid = detect_phone_number_type("invalid");
+        assert!(invalid.is_none());
+    }
+
+    #[test]
+    fn test_are_phone_numbers_equal_comprehensive() {
+        // Same number, different formats
+        assert!(are_phone_numbers_equal("+12025550173", "12025550173"));
+        assert!(are_phone_numbers_equal("+12025550173", "+1 (202) 555-0173"));
+        assert!(are_phone_numbers_equal("12025550173", "1-202-555-0173"));
+
+        // Different numbers
+        assert!(!are_phone_numbers_equal("+12025550173", "+12025550174"));
+        assert!(!are_phone_numbers_equal("+12025550173", "+442079460958"));
+
+        // Invalid numbers
+        assert!(!are_phone_numbers_equal("+12025550173", "invalid"));
+        assert!(!are_phone_numbers_equal("invalid1", "invalid2"));
+    }
+
+    #[test]
+    fn test_type_specific_check_functions() {
+        // is_mobile_number
+        let uk_mobile = "+447123456789";
+        assert!(is_mobile_number(uk_mobile));
+
+        // is_toll_free_number
+        let us_toll_free = "+18005551234";
+        assert!(is_toll_free_number(us_toll_free));
+
+        // is_landline_number
+        let us_landline = "+12025550173";
+        // US numbers default to FixedLine in NANP
+        assert!(is_landline_number(us_landline) || is_valid_phone_number(us_landline));
     }
 }

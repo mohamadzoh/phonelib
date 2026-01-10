@@ -19,11 +19,11 @@
 //! use phonelib::*;
 //!
 //! // Basic validation
-//! let is_valid = is_valid_phone_number("+12025550173".to_string());
+//! let is_valid = is_valid_phone_number("+12025550173");
 //! assert!(is_valid);
 //!
 //! // Normalize a number
-//! let normalized = normalize_phone_number("12025550173".to_string());
+//! let normalized = normalize_phone_number("12025550173");
 //! assert_eq!(normalized, Some("+12025550173".to_string()));
 //!
 //! // Extract phone numbers from text
@@ -64,12 +64,12 @@ mod tests;
 /// ```
 /// use phonelib::is_valid_phone_number;
 ///
-/// assert!(is_valid_phone_number("+12025550173".to_string()));
-/// assert!(!is_valid_phone_number("invalid".to_string()));
+/// assert!(is_valid_phone_number("+12025550173"));
+/// assert!(!is_valid_phone_number("invalid"));
 /// ```
-pub fn is_valid_phone_number(phone_number: String) -> bool {
+pub fn is_valid_phone_number(phone_number: &str) -> bool {
     // check if the phone number contains invalid character
-    if contains_invalid_character(&phone_number) {
+    if contains_invalid_character(phone_number) {
         return false;
     }
 
@@ -90,12 +90,12 @@ pub fn is_valid_phone_number(phone_number: String) -> bool {
 /// ```
 /// use phonelib::extract_country;
 ///
-/// let country = extract_country("+12025550173".to_string());
+/// let country = extract_country("+12025550173");
 /// assert!(country.is_some());
 /// assert_eq!(country.unwrap().code, "US");
 /// ```
-pub fn extract_country(phone_number: String) -> Option<&'static Country> {
-    let mut phone_number = phone_number;
+pub fn extract_country(phone_number: &str) -> Option<&'static Country> {
+    let mut phone_number = phone_number.to_string();
     remove_unwanted_character(&mut phone_number);
     extract_country_data(&phone_number)
 }
@@ -116,12 +116,12 @@ pub fn extract_country(phone_number: String) -> Option<&'static Country> {
 /// ```
 /// use phonelib::normalize_phone_number;
 ///
-/// let normalized = normalize_phone_number("12025550173".to_string());
+/// let normalized = normalize_phone_number("12025550173");
 /// assert_eq!(normalized, Some("+12025550173".to_string()));
 /// ```
-pub fn normalize_phone_number(mut phone_number: String) -> Option<String> {
+pub fn normalize_phone_number(phone_number: &str) -> Option<String> {
     // normalize the phone number in place to avoid cloning
-    normalize_phone_number_in_place(&mut phone_number)
+    normalize_phone_number_in_place(&mut phone_number.to_string())
 }
 
 /// Normalizes a phone number in place to E.164 format.
@@ -194,12 +194,12 @@ pub enum PhoneFormat {
 /// ```
 /// use phonelib::{format_phone_number, PhoneFormat};
 /// 
-/// let formatted = format_phone_number("12345678901".to_string(), PhoneFormat::E164);
+/// let formatted = format_phone_number("12345678901", PhoneFormat::E164);
 /// // Returns Some("+12345678901") if valid
 /// ```
-pub fn format_phone_number(phone_number: String, format: PhoneFormat) -> Option<String> {
+pub fn format_phone_number(phone_number: &str, format: PhoneFormat) -> Option<String> {
     let normalized = normalize_phone_number(phone_number)?;
-    let country = extract_country(normalized.clone())?;
+    let country = extract_country(&normalized)?;
     
     // Remove the '+' from normalized number for processing
     let digits = &normalized[1..];
@@ -269,12 +269,12 @@ fn format_national_number(number: &str, country: &Country) -> String {
 /// ```
 /// use phonelib::{detect_phone_number_type, PhoneNumberType};
 /// 
-/// let number_type = detect_phone_number_type("12345678901".to_string());
+/// let number_type = detect_phone_number_type("12345678901");
 /// // Returns Some(PhoneNumberType) if valid
 /// ```
-pub fn detect_phone_number_type(phone_number: String) -> Option<PhoneNumberType> {
+pub fn detect_phone_number_type(phone_number: &str) -> Option<PhoneNumberType> {
     let normalized = normalize_phone_number(phone_number)?;
-    let country = extract_country(normalized.clone())?;
+    let country = extract_country(&normalized)?;
     
     // Remove the '+' and country code to get national number
     let digits = &normalized[1..];
@@ -291,7 +291,7 @@ pub fn detect_phone_number_type(phone_number: String) -> Option<PhoneNumberType>
 /// # Returns
 /// * `true` - If the number is a mobile number
 /// * `false` - If the number is not mobile or invalid
-pub fn is_mobile_number(phone_number: String) -> bool {
+pub fn is_mobile_number(phone_number: &str) -> bool {
     detect_phone_number_type(phone_number) == Some(PhoneNumberType::Mobile)
 }
 
@@ -303,7 +303,7 @@ pub fn is_mobile_number(phone_number: String) -> bool {
 /// # Returns
 /// * `true` - If the number is a landline number
 /// * `false` - If the number is not landline or invalid
-pub fn is_landline_number(phone_number: String) -> bool {
+pub fn is_landline_number(phone_number: &str) -> bool {
     detect_phone_number_type(phone_number) == Some(PhoneNumberType::FixedLine)
 }
 
@@ -315,7 +315,7 @@ pub fn is_landline_number(phone_number: String) -> bool {
 /// # Returns
 /// * `true` - If the number is toll-free
 /// * `false` - If the number is not toll-free or invalid
-pub fn is_toll_free_number(phone_number: String) -> bool {
+pub fn is_toll_free_number(phone_number: &str) -> bool {
     detect_phone_number_type(phone_number) == Some(PhoneNumberType::TollFree)
 }
 
@@ -530,10 +530,10 @@ pub fn generate_random_phone_numbers(country_code: &str, count: usize) -> Vec<St
 /// ```
 /// use phonelib::are_phone_numbers_equal;
 /// 
-/// let equal = are_phone_numbers_equal("+1234567890".to_string(), "(234) 567-890".to_string());
+/// let equal = are_phone_numbers_equal("+1234567890", "(234) 567-890");
 /// // Returns true if both represent the same number
 /// ```
-pub fn are_phone_numbers_equal(number1: String, number2: String) -> bool {
+pub fn are_phone_numbers_equal(number1: &str, number2: &str) -> bool {
     match (normalize_phone_number(number1), normalize_phone_number(number2)) {
         (Some(norm1), Some(norm2)) => norm1 == norm2,
         _ => false,
@@ -543,7 +543,7 @@ pub fn are_phone_numbers_equal(number1: String, number2: String) -> bool {
 /// Compare multiple phone numbers and group them by equivalence
 /// 
 /// # Arguments
-/// * `phone_numbers` - Vector of phone numbers to compare
+/// * `phone_numbers` - Slice of phone numbers to compare
 /// 
 /// # Returns
 /// * `Vec<Vec<String>>` - Groups of equivalent phone numbers
@@ -552,21 +552,22 @@ pub fn are_phone_numbers_equal(number1: String, number2: String) -> bool {
 /// ```
 /// use phonelib::group_equivalent_phone_numbers;
 /// 
-/// let numbers = vec!["+1234567890".to_string(), "(234) 567-890".to_string(), "+9876543210".to_string()];
-/// let groups = group_equivalent_phone_numbers(numbers);
+/// let numbers = ["+1234567890", "(234) 567-890", "+9876543210"];
+/// let groups = group_equivalent_phone_numbers(&numbers);
 /// // Returns groups of equivalent numbers
 /// ```
-pub fn group_equivalent_phone_numbers(phone_numbers: Vec<String>) -> Vec<Vec<String>> {
+pub fn group_equivalent_phone_numbers<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Vec<String>> {
     let mut groups: Vec<Vec<String>> = Vec::new();
     
     for number in phone_numbers {
+        let number_str = number.as_ref();
         let mut found_group = false;
         
         // Try to find an existing group for this number
         for group in &mut groups {
             if let Some(representative) = group.first() {
-                if are_phone_numbers_equal(number.clone(), representative.clone()) {
-                    group.push(number.clone());
+                if are_phone_numbers_equal(number_str, representative) {
+                    group.push(number_str.to_string());
                     found_group = true;
                     break;
                 }
@@ -575,7 +576,7 @@ pub fn group_equivalent_phone_numbers(phone_numbers: Vec<String>) -> Vec<Vec<Str
         
         // If no group found, create a new one
         if !found_group {
-            groups.push(vec![number]);
+            groups.push(vec![number_str.to_string()]);
         }
     }
     
@@ -585,7 +586,7 @@ pub fn group_equivalent_phone_numbers(phone_numbers: Vec<String>) -> Vec<Vec<Str
 /// Validate multiple phone numbers at once
 /// 
 /// # Arguments
-/// * `phone_numbers` - Vector of phone numbers to validate
+/// * `phone_numbers` - Slice of phone numbers to validate
 /// 
 /// # Returns
 /// * `Vec<bool>` - Vector of validation results in the same order
@@ -594,21 +595,21 @@ pub fn group_equivalent_phone_numbers(phone_numbers: Vec<String>) -> Vec<Vec<Str
 /// ```
 /// use phonelib::validate_phone_numbers_batch;
 /// 
-/// let numbers = vec!["1234567890".to_string(), "invalid".to_string()];
-/// let results = validate_phone_numbers_batch(numbers);
+/// let numbers = ["1234567890", "invalid"];
+/// let results = validate_phone_numbers_batch(&numbers);
 /// // Returns [true, false]
 /// ```
-pub fn validate_phone_numbers_batch(phone_numbers: Vec<String>) -> Vec<bool> {
+pub fn validate_phone_numbers_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<bool> {
     phone_numbers
-        .into_iter()
-        .map(is_valid_phone_number)
+        .iter()
+        .map(|n| is_valid_phone_number(n.as_ref()))
         .collect()
 }
 
 /// Normalize multiple phone numbers at once
 /// 
 /// # Arguments
-/// * `phone_numbers` - Vector of phone numbers to normalize
+/// * `phone_numbers` - Slice of phone numbers to normalize
 /// 
 /// # Returns
 /// * `Vec<Option<String>>` - Vector of normalized numbers (None for invalid ones)
@@ -617,21 +618,21 @@ pub fn validate_phone_numbers_batch(phone_numbers: Vec<String>) -> Vec<bool> {
 /// ```
 /// use phonelib::normalize_phone_numbers_batch;
 /// 
-/// let numbers = vec!["1234567890".to_string(), "(234) 567-890".to_string()];
-/// let normalized = normalize_phone_numbers_batch(numbers);
+/// let numbers = ["1234567890", "(234) 567-890"];
+/// let normalized = normalize_phone_numbers_batch(&numbers);
 /// // Returns [Some("+1234567890"), Some("+1234567890")]
 /// ```
-pub fn normalize_phone_numbers_batch(phone_numbers: Vec<String>) -> Vec<Option<String>> {
+pub fn normalize_phone_numbers_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Option<String>> {
     phone_numbers
-        .into_iter()
-        .map(normalize_phone_number)
+        .iter()
+        .map(|n| normalize_phone_number(n.as_ref()))
         .collect()
 }
 
 /// Extract countries for multiple phone numbers at once
 /// 
 /// # Arguments
-/// * `phone_numbers` - Vector of phone numbers to analyze
+/// * `phone_numbers` - Slice of phone numbers to analyze
 /// 
 /// # Returns
 /// * `Vec<Option<&'static Country>>` - Vector of country data (None for invalid ones)
@@ -640,21 +641,21 @@ pub fn normalize_phone_numbers_batch(phone_numbers: Vec<String>) -> Vec<Option<S
 /// ```
 /// use phonelib::extract_countries_batch;
 /// 
-/// let numbers = vec!["1234567890".to_string(), "44123456789".to_string()];
-/// let countries = extract_countries_batch(numbers);
+/// let numbers = ["1234567890", "44123456789"];
+/// let countries = extract_countries_batch(&numbers);
 /// // Returns country data for each number
 /// ```
-pub fn extract_countries_batch(phone_numbers: Vec<String>) -> Vec<Option<&'static Country>> {
+pub fn extract_countries_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Option<&'static Country>> {
     phone_numbers
-        .into_iter()
-        .map(extract_country)
+        .iter()
+        .map(|n| extract_country(n.as_ref()))
         .collect()
 }
 
 /// Detect phone number types for multiple numbers at once
 /// 
 /// # Arguments
-/// * `phone_numbers` - Vector of phone numbers to analyze
+/// * `phone_numbers` - Slice of phone numbers to analyze
 /// 
 /// # Returns
 /// * `Vec<Option<PhoneNumberType>>` - Vector of phone number types
@@ -663,21 +664,21 @@ pub fn extract_countries_batch(phone_numbers: Vec<String>) -> Vec<Option<&'stati
 /// ```
 /// use phonelib::detect_phone_number_types_batch;
 /// 
-/// let numbers = vec!["1234567890".to_string(), "447123456789".to_string()];
-/// let types = detect_phone_number_types_batch(numbers);
+/// let numbers = ["1234567890", "447123456789"];
+/// let types = detect_phone_number_types_batch(&numbers);
 /// // Returns phone number types for each number
 /// ```
-pub fn detect_phone_number_types_batch(phone_numbers: Vec<String>) -> Vec<Option<PhoneNumberType>> {
+pub fn detect_phone_number_types_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Option<PhoneNumberType>> {
     phone_numbers
-        .into_iter()
-        .map(detect_phone_number_type)
+        .iter()
+        .map(|n| detect_phone_number_type(n.as_ref()))
         .collect()
 }
 
 /// Comprehensive batch analysis of phone numbers
 /// 
 /// # Arguments
-/// * `phone_numbers` - Vector of phone numbers to analyze
+/// * `phone_numbers` - Slice of phone numbers to analyze
 /// 
 /// # Returns
 /// * `Vec<PhoneNumberAnalysis>` - Detailed analysis for each number
@@ -686,20 +687,21 @@ pub fn detect_phone_number_types_batch(phone_numbers: Vec<String>) -> Vec<Option
 /// ```
 /// use phonelib::analyze_phone_numbers_batch;
 /// 
-/// let numbers = vec!["1234567890".to_string()];
-/// let analyses = analyze_phone_numbers_batch(numbers);
+/// let numbers = ["1234567890"];
+/// let analyses = analyze_phone_numbers_batch(&numbers);
 /// ```
-pub fn analyze_phone_numbers_batch(phone_numbers: Vec<String>) -> Vec<PhoneNumberAnalysis> {
+pub fn analyze_phone_numbers_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<PhoneNumberAnalysis> {
     phone_numbers
-        .into_iter()
+        .iter()
         .map(|number| {
-            let is_valid = is_valid_phone_number(number.clone());
-            let normalized = normalize_phone_number(number.clone());
-            let country = extract_country(number.clone());
-            let phone_type = detect_phone_number_type(number.clone());
+            let number_str = number.as_ref();
+            let is_valid = is_valid_phone_number(number_str);
+            let normalized = normalize_phone_number(number_str);
+            let country = extract_country(number_str);
+            let phone_type = detect_phone_number_type(number_str);
             
             PhoneNumberAnalysis {
-                original: number,
+                original: number_str.to_string(),
                 is_valid,
                 normalized,
                 country,
@@ -732,23 +734,23 @@ pub struct PhoneNumberAnalysis {
 /// ```
 /// use phonelib::suggest_phone_number_corrections;
 /// 
-/// let suggestions = suggest_phone_number_corrections("123456789".to_string(), Some("US"));
+/// let suggestions = suggest_phone_number_corrections("123456789", Some("US"));
 /// // Returns possible corrections like "+1123456789"
 /// ```
-pub fn suggest_phone_number_corrections(phone_number: String, country_hint: Option<&str>) -> Vec<String> {
-    if is_valid_phone_number(phone_number.clone()) {
-        return vec![phone_number]; // Already valid
+pub fn suggest_phone_number_corrections(phone_number: &str, country_hint: Option<&str>) -> Vec<String> {
+    if is_valid_phone_number(phone_number) {
+        return vec![phone_number.to_string()]; // Already valid
     }
     
     let mut suggestions = Vec::new();
-    let mut cleaned = phone_number.clone();
+    let mut cleaned = phone_number.to_string();
     remove_non_digit_character(&mut cleaned);
     
     // Try adding country codes
     if let Some(hint) = country_hint {
         if let Some(country) = COUNTRIES.iter().find(|c| c.code == hint) {
             let suggestion = format!("+{}{}", country.prefix, cleaned);
-            if is_valid_phone_number(suggestion.clone()) {
+            if is_valid_phone_number(&suggestion) {
                 suggestions.push(suggestion);
             }
         }
@@ -758,7 +760,7 @@ pub fn suggest_phone_number_corrections(phone_number: String, country_hint: Opti
         for &country_code in &common_countries {
             if let Some(country) = COUNTRIES.iter().find(|c| c.code == country_code) {
                 let suggestion = format!("+{}{}", country.prefix, cleaned);
-                if is_valid_phone_number(suggestion.clone()) {
+                if is_valid_phone_number(&suggestion) {
                     suggestions.push(suggestion);
                 }
             }
@@ -772,7 +774,7 @@ pub fn suggest_phone_number_corrections(phone_number: String, country_hint: Opti
             if let Some(hint) = country_hint {
                 if let Some(country) = COUNTRIES.iter().find(|c| c.code == hint) {
                     let suggestion = format!("+{}{}", country.prefix, shortened);
-                    if is_valid_phone_number(suggestion.clone()) {
+                    if is_valid_phone_number(&suggestion) {
                         suggestions.push(suggestion);
                         break;
                     }
@@ -788,7 +790,7 @@ pub fn suggest_phone_number_corrections(phone_number: String, country_hint: Opti
             if let Some(hint) = country_hint {
                 if let Some(country) = COUNTRIES.iter().find(|c| c.code == hint) {
                     let suggestion = format!("+{}{}", country.prefix, extended);
-                    if is_valid_phone_number(suggestion.clone()) {
+                    if is_valid_phone_number(&suggestion) {
                         suggestions.push(suggestion);
                     }
                 }
@@ -816,10 +818,10 @@ pub fn suggest_phone_number_corrections(phone_number: String, country_hint: Opti
 /// ```
 /// use phonelib::is_potentially_valid_phone_number;
 /// 
-/// let might_be_valid = is_potentially_valid_phone_number("123-456-7890".to_string());
+/// let might_be_valid = is_potentially_valid_phone_number("123-456-7890");
 /// ```
-pub fn is_potentially_valid_phone_number(phone_number: String) -> bool {
-    let mut cleaned = phone_number;
+pub fn is_potentially_valid_phone_number(phone_number: &str) -> bool {
+    let mut cleaned = phone_number.to_string();
     remove_non_digit_character(&mut cleaned);
     
     // Check if length is reasonable for a phone number
@@ -838,10 +840,10 @@ pub fn is_potentially_valid_phone_number(phone_number: String) -> bool {
 /// ```
 /// use phonelib::guess_country_from_number;
 /// 
-/// let country = guess_country_from_number("1234567890".to_string());
+/// let country = guess_country_from_number("1234567890");
 /// ```
-pub fn guess_country_from_number(phone_number: String) -> Option<&'static Country> {
-    let mut cleaned = phone_number;
+pub fn guess_country_from_number(phone_number: &str) -> Option<&'static Country> {
+    let mut cleaned = phone_number.to_string();
     remove_non_digit_character(&mut cleaned);
     
     if cleaned.is_empty() {
@@ -888,7 +890,7 @@ fn remove_unwanted_character(phone_number: &mut String) {
 }
 
 
-fn contains_invalid_character(phone_number: &String) -> bool {
+fn contains_invalid_character(phone_number: &str) -> bool {
     let mut parentheses_count = 0;
     // check if the phone number contains invalid character
     // use as_bytes() for better performance when checking ASCII characters
@@ -1001,7 +1003,7 @@ pub fn extract_phone_numbers_from_text(text: &str) -> Vec<ExtractedPhoneNumber> 
         // Look for potential phone number starts
         if is_phone_number_start(&chars, i) {
             if let Some((phone_str, start_byte, end_byte)) = extract_phone_candidate(text, &chars, i) {
-                let normalized = normalize_phone_number(phone_str.clone());
+                let normalized = normalize_phone_number(&phone_str);
                 let is_valid = normalized.is_some();
                 
                 // Only include if it looks like a real phone number (7+ digits)
@@ -1087,7 +1089,7 @@ pub fn extract_phone_numbers_with_country_hint(text: &str, default_country: &str
                 
                 if digit_count >= 7 {
                     // First try to normalize as-is
-                    let mut normalized = normalize_phone_number(phone_str.clone());
+                    let mut normalized = normalize_phone_number(&phone_str);
                     
                     // If that fails and we have a country hint, try adding country code
                     if normalized.is_none() {
@@ -1095,7 +1097,7 @@ pub fn extract_phone_numbers_with_country_hint(text: &str, default_country: &str
                             let mut cleaned = phone_str.clone();
                             remove_non_digit_character(&mut cleaned);
                             let with_country = format!("+{}{}", c.prefix, cleaned);
-                            normalized = normalize_phone_number(with_country);
+                            normalized = normalize_phone_number(&with_country);
                         }
                     }
                     
@@ -1360,9 +1362,9 @@ impl PhoneNumber {
     /// * `Some(PhoneNumber)` - If the input is a valid phone number
     /// * `None` - If the input is invalid
     pub fn parse(input: &str) -> Option<Self> {
-        let normalized = normalize_phone_number(input.to_string())?;
-        let country = extract_country(normalized.clone());
-        let phone_type = detect_phone_number_type(normalized.clone());
+        let normalized = normalize_phone_number(input)?;
+        let country = extract_country(&normalized);
+        let phone_type = detect_phone_number_type(&normalized);
         
         Some(PhoneNumber {
             original: input.to_string(),
@@ -1421,7 +1423,7 @@ impl PhoneNumber {
     
     /// Format the phone number
     pub fn format(&self, format: PhoneFormat) -> String {
-        format_phone_number(self.normalized.clone(), format)
+        format_phone_number(&self.normalized, format)
             .unwrap_or_else(|| self.normalized.clone())
     }
     
@@ -1512,7 +1514,7 @@ impl PhoneNumberSet {
     
     /// Check if a phone number is in the set
     pub fn contains(&self, phone_number: &str) -> bool {
-        if let Some(normalized) = normalize_phone_number(phone_number.to_string()) {
+        if let Some(normalized) = normalize_phone_number(phone_number) {
             self.numbers.contains_key(&normalized)
         } else {
             false
@@ -1541,7 +1543,7 @@ impl PhoneNumberSet {
     
     /// Remove a phone number from the set
     pub fn remove(&mut self, phone_number: &str) -> bool {
-        if let Some(normalized) = normalize_phone_number(phone_number.to_string()) {
+        if let Some(normalized) = normalize_phone_number(phone_number) {
             self.numbers.remove(&normalized).is_some()
         } else {
             false
@@ -1550,7 +1552,7 @@ impl PhoneNumberSet {
     
     /// Find all duplicates of a phone number (different formats)
     pub fn find_duplicates(&self, phone_number: &str) -> Option<&PhoneNumber> {
-        let normalized = normalize_phone_number(phone_number.to_string())?;
+        let normalized = normalize_phone_number(phone_number)?;
         self.numbers.get(&normalized)
     }
 }

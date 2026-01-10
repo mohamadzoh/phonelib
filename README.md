@@ -27,7 +27,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phonelib = "0.3.0"
+phonelib = "1.0.0"
 ```
 
 ## Quick Start
@@ -36,16 +36,16 @@ phonelib = "0.3.0"
 use phonelib::*;
 
 // Basic validation
-let is_valid = is_valid_phone_number("+12025550173".to_string());
+let is_valid = is_valid_phone_number("+12025550173");
 
 // Format a number
 let formatted = format_phone_number(
-    "12025550173".to_string(), 
+    "12025550173", 
     PhoneFormat::International
 );
 
 // Detect number type
-let number_type = detect_phone_number_type("+442079460958".to_string());
+let number_type = detect_phone_number_type("+442079460958");
 
 // Extract phone numbers from text
 let text = "Call me at +12025550173 or +442079460958";
@@ -90,7 +90,7 @@ pub enum PhoneNumberType {
 ```rust
 use phonelib::is_valid_phone_number;
 
-let phone_number = "+1234567890".to_string();
+let phone_number = "+1234567890";
 if is_valid_phone_number(phone_number) {
     println!("Valid phone number!");
 }
@@ -101,7 +101,7 @@ if is_valid_phone_number(phone_number) {
 ```rust
 use phonelib::extract_country;
 
-let phone_number = "+1234567890".to_string();
+let phone_number = "+1234567890";
 match extract_country(phone_number) {
     Some(country) => println!("Country: {} ({})", country.name, country.code),
     None => println!("Country not found"),
@@ -114,7 +114,7 @@ match extract_country(phone_number) {
 use phonelib::{normalize_phone_number, normalize_phone_number_in_place};
 
 // Returns normalized number without modifying input
-let normalized = normalize_phone_number("+1 (234) 567-890".to_string());
+let normalized = normalize_phone_number("+1 (234) 567-890");
 println!("Normalized: {:?}", normalized); // Some("+1234567890")
 
 // Modifies the input string in place
@@ -128,22 +128,22 @@ println!("In-place normalized: {}", phone);
 ```rust
 use phonelib::{format_phone_number, PhoneFormat};
 
-let number = "1234567890".to_string();
+let number = "1234567890";
 
 // E.164 format
-let e164 = format_phone_number(number.clone(), PhoneFormat::E164);
+let e164 = format_phone_number(number, PhoneFormat::E164);
 // Result: Some("+1234567890")
 
 // International format
-let intl = format_phone_number(number.clone(), PhoneFormat::International);
+let intl = format_phone_number(number, PhoneFormat::International);
 // Result: Some("+1 234 567-890")
 
 // National format
-let national = format_phone_number(number.clone(), PhoneFormat::National);
+let national = format_phone_number(number, PhoneFormat::National);
 // Result: Some("(234) 567-890")
 
 // RFC3966 format
-let rfc = format_phone_number(number.clone(), PhoneFormat::RFC3966);
+let rfc = format_phone_number(number, PhoneFormat::RFC3966);
 // Result: Some("tel:+1-234-567-890")
 ```
 
@@ -155,12 +155,12 @@ use phonelib::{
     is_landline_number, is_toll_free_number, PhoneNumberType
 };
 
-let mobile = "447123456789".to_string();
-let landline = "442079460958".to_string();
-let toll_free = "18001234567".to_string();
+let mobile = "447123456789";
+let landline = "442079460958";
+let toll_free = "18001234567";
 
 // Detect specific type
-match detect_phone_number_type(mobile.clone()) {
+match detect_phone_number_type(mobile) {
     Some(PhoneNumberType::Mobile) => println!("It's a mobile number!"),
     Some(other_type) => println!("It's a {:?}", other_type),
     None => println!("Invalid or unknown type"),
@@ -200,22 +200,22 @@ println!("5 random UK numbers: {:?}", random_numbers);
 use phonelib::{are_phone_numbers_equal, group_equivalent_phone_numbers};
 
 // Compare two numbers
-let num1 = "+1234567890".to_string();
-let num2 = "(234) 567-890".to_string();
+let num1 = "+1234567890";
+let num2 = "(234) 567-890";
 
 if are_phone_numbers_equal(num1, num2) {
     println!("Numbers are equivalent!");
 }
 
 // Group equivalent numbers
-let numbers = vec![
-    "+1234567890".to_string(),
-    "(234) 567-890".to_string(),
-    "+9876543210".to_string(),
-    "987-654-3210".to_string(),
+let numbers = [
+    "+1234567890",
+    "(234) 567-890",
+    "+9876543210",
+    "987-654-3210",
 ];
 
-let groups = group_equivalent_phone_numbers(numbers);
+let groups = group_equivalent_phone_numbers(&numbers);
 for (i, group) in groups.iter().enumerate() {
     println!("Group {}: {:?}", i + 1, group);
 }
@@ -231,26 +231,26 @@ use phonelib::{
     analyze_phone_numbers_batch
 };
 
-let numbers = vec![
-    "1234567890".to_string(),
-    "invalid".to_string(),
-    "447123456789".to_string(),
+let numbers = [
+    "1234567890",
+    "invalid",
+    "447123456789",
 ];
 
 // Batch validation
-let valid_results = validate_phone_numbers_batch(numbers.clone());
+let valid_results = validate_phone_numbers_batch(&numbers);
 println!("Validation results: {:?}", valid_results);
 
 // Batch normalization
-let normalized_results = normalize_phone_numbers_batch(numbers.clone());
+let normalized_results = normalize_phone_numbers_batch(&numbers);
 println!("Normalized results: {:?}", normalized_results);
 
 // Batch type detection
-let type_results = detect_phone_number_types_batch(numbers.clone());
+let type_results = detect_phone_number_types_batch(&numbers);
 println!("Type results: {:?}", type_results);
 
 // Comprehensive batch analysis
-let analyses = analyze_phone_numbers_batch(numbers);
+let analyses = analyze_phone_numbers_batch(&numbers);
 for analysis in analyses {
     println!("Original: {}", analysis.original);
     println!("Valid: {}", analysis.is_valid);
@@ -271,18 +271,18 @@ use phonelib::{
 };
 
 // Get suggestions for invalid numbers
-let invalid_number = "123456789".to_string();
+let invalid_number = "123456789";
 let suggestions = suggest_phone_number_corrections(invalid_number, Some("US"));
 println!("Suggestions: {:?}", suggestions);
 
 // Check if a number might be valid with different formatting
-let maybe_valid = "123-456-7890".to_string();
+let maybe_valid = "123-456-7890";
 if is_potentially_valid_phone_number(maybe_valid) {
     println!("This number might be valid with proper formatting");
 }
 
 // Guess country from number patterns
-let mystery_number = "442079460958".to_string();
+let mystery_number = "442079460958";
 match guess_country_from_number(mystery_number) {
     Some(country) => println!("Likely from: {}", country.name),
     None => println!("Cannot determine country"),
@@ -400,15 +400,6 @@ The library supports **246 countries** with accurate:
 - 🇦🇺 Australia
 - And 240+ more countries worldwide
 
-## Performance
-
-The library is optimized for performance:
-- ✅ Zero external dependencies
-- ✅ Efficient string processing
-- ✅ Batch processing capabilities
-- ✅ In-place operations available
-
-Benchmark results show excellent performance for validation and normalization operations.
 
 ## Examples
 
@@ -418,7 +409,7 @@ Benchmark results show excellent performance for validation and normalization op
 use phonelib::*;
 
 fn main() {
-    let numbers = vec![
+    let numbers = [
         "1234567890",
         "+44 7123 456789",
         "(555) 123-4567",
@@ -426,30 +417,29 @@ fn main() {
     ];
     
     for number in numbers {
-        let number = number.to_string();
         println!("\n--- Analyzing: {} ---", number);
         
         // Basic validation
-        let is_valid = is_valid_phone_number(number.clone());
+        let is_valid = is_valid_phone_number(number);
         println!("Valid: {}", is_valid);
         
         if is_valid {
             // Format in different styles
-            if let Some(e164) = format_phone_number(number.clone(), PhoneFormat::E164) {
+            if let Some(e164) = format_phone_number(number, PhoneFormat::E164) {
                 println!("E.164: {}", e164);
             }
             
-            if let Some(intl) = format_phone_number(number.clone(), PhoneFormat::International) {
+            if let Some(intl) = format_phone_number(number, PhoneFormat::International) {
                 println!("International: {}", intl);
             }
             
             // Detect country
-            if let Some(country) = extract_country(number.clone()) {
+            if let Some(country) = extract_country(number) {
                 println!("Country: {} ({})", country.name, country.code);
             }
             
             // Detect type
-            if let Some(phone_type) = detect_phone_number_type(number.clone()) {
+            if let Some(phone_type) = detect_phone_number_type(number) {
                 println!("Type: {:?}", phone_type);
             }
         } else {
@@ -495,9 +485,30 @@ cargo clippy
 
 ## Changelog
 
-### v0.2.1 (Latest)
+### v1.0.0 (Latest)
 
-🎉 **Text Extraction & Equality Release**
+**First Stable Release**
+
+This release marks the first stable version of phonelib, with a production-ready API.
+
+- **Breaking Change**: All functions now accept `&str` instead of `String` for better ergonomics
+  - No more `.to_string()` calls needed!
+  - `is_valid_phone_number("+12025550173")` just works
+- **Breaking Change**: Batch functions now accept `&[T]` where `T: AsRef<str>` instead of `Vec<String>`
+  - Works with arrays, slices, or Vecs of `&str` or `String`
+  - `validate_phone_numbers_batch(&["123", "456"])` just works
+- Zero allocations for read-only operations
+- Added support for Cymru (Wales) with country code `GB-CYM`
+
+### v0.3.0
+
+🏴󠁧󠁢󠁷󠁬󠁳󠁿 **Cymru Support**
+
+- Added support for Cymru (Wales) with country code `GB-CYM`
+
+### v0.2.1
+
+**Text Extraction & Equality Release**
 
 - 📝 **Text Extraction** - Extract phone numbers from free-form text
   - `extract_phone_numbers_from_text` - Find all phone numbers in text
@@ -516,7 +527,7 @@ cargo clippy
 
 ### v0.2.0
 
-🎉 **Major Feature Release**
+**Major Feature Release**
 
 - ✨ **Phone Number Formatting** - Multiple format support (E.164, International, National, RFC3966)
 - 📱 **Type Detection** - Identify mobile, landline, toll-free, premium numbers
