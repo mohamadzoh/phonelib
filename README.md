@@ -27,7 +27,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phonelib = "1.0.0"
+phonelib = "1.0.1"
 ```
 
 ## Quick Start
@@ -484,6 +484,10 @@ cargo clippy
 ```
 
 ## Changelog
+
+### v1.0.1
+**Minor Bug Fixes**
+- Fixed edge case in phone number normalization for certain country codes
 
 ### v1.0.0 (Latest)
 

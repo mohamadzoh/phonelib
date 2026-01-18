@@ -1121,6 +1121,30 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_french_national_format_with_leading_zero() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // French national numbers have 10 digits starting with 0
+        // The leading 0 is a trunk prefix and should be stripped when normalizing
+        let numbers = extract_phone_numbers_with_country_hint("0645342545", "FR");
+        assert_eq!(numbers.len(), 1);
+        assert!(numbers[0].is_valid);
+        assert_eq!(numbers[0].normalized, Some("+33645342545".to_string()));
+
+        // Also test without leading zero (9 digits)
+        let numbers_no_zero = extract_phone_numbers_with_country_hint("645342545", "FR");
+        assert_eq!(numbers_no_zero.len(), 1);
+        assert!(numbers_no_zero[0].is_valid);
+        assert_eq!(numbers_no_zero[0].normalized, Some("+33645342545".to_string()));
+
+        // Test UK number with leading 0 (trunk prefix)
+        let uk_numbers = extract_phone_numbers_with_country_hint("07911123456", "GB");
+        assert_eq!(uk_numbers.len(), 1);
+        assert!(uk_numbers[0].is_valid);
+        assert_eq!(uk_numbers[0].normalized, Some("+447911123456".to_string()));
+    }
+
+    #[test]
     fn test_count_phone_numbers() {
         use crate::count_phone_numbers_in_text;
 

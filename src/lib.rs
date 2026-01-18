@@ -1096,6 +1096,8 @@ pub fn extract_phone_numbers_with_country_hint(text: &str, default_country: &str
                         if let Some(c) = country {
                             let mut cleaned = phone_str.clone();
                             remove_non_digit_character(&mut cleaned);
+                            // Remove leading zeros (trunk prefix) from national format numbers
+                            leading_zero_remover(&mut cleaned);
                             let with_country = format!("+{}{}", c.prefix, cleaned);
                             normalized = normalize_phone_number(&with_country);
                         }
