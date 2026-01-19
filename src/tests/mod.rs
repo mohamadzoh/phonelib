@@ -1154,12 +1154,179 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(result[0].is_valid);
         assert_eq!(result[0].normalized, Some("+33612345678".to_string()));
+    }
 
-        // Verify the fix works for numbers that could be misinterpreted
-        // 061... could be Australia (+61) but with FR hint should be France (+33)
-        let result2 = extract_phone_numbers_with_country_hint("0612345679", "FR");
-        assert_eq!(result2.len(), 1);
-        assert_eq!(result2[0].normalized, Some("+33612345679".to_string()));
+    #[test]
+    fn test_extract_with_country_hint_german_numbers() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // German national format with leading 0
+        let numbers = extract_phone_numbers_with_country_hint("030 12345678", "DE");
+        assert_eq!(numbers.len(), 1);
+        assert!(numbers[0].is_valid);
+        assert_eq!(numbers[0].normalized, Some("+493012345678".to_string()));
+
+        // German mobile number
+        let mobile = extract_phone_numbers_with_country_hint("0151 12345678", "DE");
+        assert_eq!(mobile.len(), 1);
+        assert!(mobile[0].is_valid);
+        assert_eq!(mobile[0].normalized, Some("+4915112345678".to_string()));
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_already_international() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // Number already has country code - should still work
+        let numbers = extract_phone_numbers_with_country_hint("+33645342545", "FR");
+        assert_eq!(numbers.len(), 1);
+        assert!(numbers[0].is_valid);
+        assert_eq!(numbers[0].normalized, Some("+33645342545".to_string()));
+
+        // International number from different country than hint
+        let us_in_fr = extract_phone_numbers_with_country_hint("+12025550173", "FR");
+        assert_eq!(us_in_fr.len(), 1);
+        assert!(us_in_fr[0].is_valid);
+        // Should normalize using the actual country code, not the hint
+        assert_eq!(us_in_fr[0].normalized, Some("+12025550173".to_string()));
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_multiple_numbers() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        let text = "Call 0645342545 or 0712345678 for support";
+        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
+        
+        assert_eq!(numbers.len(), 2);
+        assert!(numbers[0].is_valid);
+        assert!(numbers[1].is_valid);
+        assert_eq!(numbers[0].normalized, Some("+33645342545".to_string()));
+        assert_eq!(numbers[1].normalized, Some("+33712345678".to_string()));
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_mixed_formats() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // Mix of national and international formats in French context
+        let text = "Numbers: 06 45 34 25 45, +33 6 12 34 56 78";
+        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
+        
+        assert_eq!(numbers.len(), 2);
+        // Both should be valid French numbers
+        for num in &numbers {
+            assert!(num.is_valid);
+            assert!(num.normalized.as_ref().unwrap().starts_with("+33"));
+        }
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_us_formats() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // Various US national formats
+        let formats = [
+            ("(202) 555-0173", "+12025550173"),
+            ("202-555-0173", "+12025550173"),
+            ("202.555.0173", "+12025550173"),
+            ("2025550173", "+12025550173"),
+        ];
+
+        for (input, expected) in formats {
+            let numbers = extract_phone_numbers_with_country_hint(input, "US");
+            assert_eq!(numbers.len(), 1, "Failed for input: {}", input);
+            assert!(numbers[0].is_valid, "Invalid for input: {}", input);
+            assert_eq!(numbers[0].normalized, Some(expected.to_string()), "Wrong normalization for: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_invalid_country_code() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // Invalid country code should still attempt normalization
+        let numbers = extract_phone_numbers_with_country_hint("+12025550173", "XX");
+        assert_eq!(numbers.len(), 1);
+        // Should still work via fallback normalization
+        assert!(numbers[0].is_valid);
+        assert_eq!(numbers[0].normalized, Some("+12025550173".to_string()));
+
+        // National number with invalid country hint won't normalize
+        let national = extract_phone_numbers_with_country_hint("0645342545", "XX");
+        assert_eq!(national.len(), 1);
+        // Can't normalize without valid country
+        assert!(!national[0].is_valid);
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_australian_numbers() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // Australian mobile with leading 0
+        let numbers = extract_phone_numbers_with_country_hint("0412345678", "AU");
+        assert_eq!(numbers.len(), 1);
+        assert!(numbers[0].is_valid);
+        assert_eq!(numbers[0].normalized, Some("+61412345678".to_string()));
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_preserves_raw() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        let text = "Call (06) 45-34-25-45";
+        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
+        
+        assert_eq!(numbers.len(), 1);
+        // Raw should preserve original format
+        assert!(numbers[0].raw.contains("06"));
+        // But normalized should be clean E.164
+        assert_eq!(numbers[0].normalized, Some("+33645342545".to_string()));
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_positions() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        let text = "Phone: 0645342545";
+        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
+        
+        assert_eq!(numbers.len(), 1);
+        // Verify positions
+        assert!(numbers[0].start > 0); // Not at beginning
+        assert!(numbers[0].end > numbers[0].start);
+        assert!(numbers[0].end <= text.len());
+        
+        // Extract using positions should give us the raw number
+        let extracted = &text[numbers[0].start..numbers[0].end];
+        assert!(extracted.contains("0645342545") || extracted == "0645342545");
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_empty_text() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        let numbers = extract_phone_numbers_with_country_hint("", "FR");
+        assert!(numbers.is_empty());
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_no_numbers() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        let text = "No phone numbers here, just text!";
+        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
+        assert!(numbers.is_empty());
+    }
+
+    #[test]
+    fn test_extract_with_country_hint_short_numbers_ignored() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // Numbers with less than 7 digits should be ignored
+        let text = "Code: 12345, PIN: 9999";
+        let numbers = extract_phone_numbers_with_country_hint(text, "US");
+        assert!(numbers.is_empty());
     }
 
     #[test]
