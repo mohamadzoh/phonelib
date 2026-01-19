@@ -1145,6 +1145,24 @@ mod tests {
     }
 
     #[test]
+    fn test_country_hint_priority_over_ambiguous_normalization() {
+        use crate::extract_phone_numbers_with_country_hint;
+
+        // "0612345678" with FR hint should normalize to +33612345678 (France)
+        // NOT +612345678 (Australia) - the country hint should take priority
+        let result = extract_phone_numbers_with_country_hint("0612345678", "FR");
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_valid);
+        assert_eq!(result[0].normalized, Some("+33612345678".to_string()));
+
+        // Verify the fix works for numbers that could be misinterpreted
+        // 061... could be Australia (+61) but with FR hint should be France (+33)
+        let result2 = extract_phone_numbers_with_country_hint("0612345679", "FR");
+        assert_eq!(result2.len(), 1);
+        assert_eq!(result2[0].normalized, Some("+33612345679".to_string()));
+    }
+
+    #[test]
     fn test_count_phone_numbers() {
         use crate::count_phone_numbers_in_text;
 
