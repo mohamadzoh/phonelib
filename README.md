@@ -34,19 +34,13 @@ Phonelib is the fastest phone number formatting library in the Rust ecosystem.
 | National | **~31ns** | ~855ns | ~1.69µs | 27.6x faster |
 | RFC3966 | **~54ns** | ~704ns | ~1.80µs | 13.0x faster |
 
-**Parsing:**
-
-| Operation | phonelib | rlibphonenumber | rust-phonenumber |
-|-----------|----------|-----------------|------------------|
-| parse() | ~2.57µs | ~980ns | ~2.97µs |
-
 ## Installation
 
 Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phonelib = "1.1.0"
+phonelib = "1.1.1"
 ```
 
 ## Quick Start
