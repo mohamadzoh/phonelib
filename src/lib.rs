@@ -37,6 +37,9 @@
 //! assert_eq!(num1, num2);
 //! ```
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use constants::COUNTRIES;
 use definitions::Country;
 
@@ -45,6 +48,17 @@ pub use definitions::PhoneNumberType;
 mod constants;
 mod definitions;
 mod tests;
+
+fn prefix_map() -> &'static HashMap<u32, Vec<&'static Country>> {
+    static MAP: OnceLock<HashMap<u32, Vec<&'static Country>>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map = HashMap::with_capacity(256);
+        for country in COUNTRIES.iter() {
+            map.entry(country.prefix).or_insert_with(Vec::new).push(country);
+        }
+        map
+    })
+}
 
 /// Validates whether a phone number is valid.
 ///
@@ -120,8 +134,7 @@ pub fn extract_country(phone_number: &str) -> Option<&'static Country> {
 /// assert_eq!(normalized, Some("+12025550173".to_string()));
 /// ```
 pub fn normalize_phone_number(phone_number: &str) -> Option<String> {
-    // normalize the phone number in place to avoid cloning
-    normalize_phone_number_in_place(&mut phone_number.to_string())
+    normalize_and_extract(phone_number).map(|(normalized, _, _)| normalized)
 }
 
 /// Normalizes a phone number in place to E.164 format.
@@ -151,20 +164,59 @@ pub fn normalize_phone_number_in_place(phone_number: &mut String) -> Option<Stri
     let country = extract_country_data(phone_number)?;
 
     // Remove country code from phone number
-    let prefix_digits = count_digits(country.prefix);
-    phone_number.drain(0..prefix_digits);
+    let plen = prefix_digit_count(country.prefix);
+    phone_number.drain(0..plen);
 
     // Remove all leading zeros if present
     leading_zero_remover(phone_number);
 
-    // Add country code again to the phone number and return it
-    // Use capacity hint and push_str for better performance
-    let mut normalized = String::with_capacity(phone_number.len() + prefix_digits + 1);
+    // Build E.164 string without intermediate allocations
+    let mut normalized = String::with_capacity(phone_number.len() + plen + 1);
     normalized.push('+');
-    normalized.push_str(&country.prefix.to_string());
+    push_prefix_digits(&mut normalized, country.prefix);
     normalized.push_str(phone_number);
 
     Some(normalized)
+}
+
+/// Internal: normalize input and extract all metadata in a single pass.
+/// Avoids redundant normalization and country lookups.
+fn normalize_and_extract(input: &str) -> Option<(String, &'static Country, PhoneNumberType)> {
+    // Extract digits into stack buffer (avoids heap allocation for cleaning)
+    let mut digits = [0u8; 20];
+    let mut digit_count = 0;
+    for &b in input.as_bytes() {
+        if b.is_ascii_digit() {
+            if digit_count >= 20 { return None; }
+            digits[digit_count] = b;
+            digit_count += 1;
+        }
+    }
+
+    // Skip leading zeros
+    let start = digits[..digit_count].iter().position(|&b| b != b'0').unwrap_or(digit_count);
+    let cleaned = std::str::from_utf8(&digits[start..digit_count]).ok()?;
+    if cleaned.is_empty() { return None; }
+
+    let country = extract_country_data(cleaned)?;
+
+    let plen = prefix_digit_count(country.prefix);
+    let after_prefix = &cleaned[plen..];
+
+    // Remove leading zeros from national part (trunk prefix after country code)
+    let nat_start = after_prefix.as_bytes().iter().position(|&b| b != b'0').unwrap_or(after_prefix.len());
+    let national = &after_prefix[nat_start..];
+
+    // Classify type from national number
+    let phone_type = classify_phone_number_type(national, country);
+
+    // Build E.164 string
+    let mut normalized = String::with_capacity(national.len() + plen + 1);
+    normalized.push('+');
+    push_prefix_digits(&mut normalized, country.prefix);
+    normalized.push_str(national);
+
+    Some((normalized, country, phone_type))
 }
 
 /// Phone number format options
@@ -198,57 +250,95 @@ pub enum PhoneFormat {
 /// // Returns Some("+12345678901") if valid
 /// ```
 pub fn format_phone_number(phone_number: &str, format: PhoneFormat) -> Option<String> {
-    let normalized = normalize_phone_number(phone_number)?;
-    let country = extract_country(&normalized)?;
-    
-    // Remove the '+' from normalized number for processing
-    let digits = &normalized[1..];
-    let country_code = &normalized[1..1 + count_digits(country.prefix)];
-    let national_number = &digits[count_digits(country.prefix)..];
-    
+    let (normalized, country, _) = normalize_and_extract(phone_number)?;
+
     match format {
         PhoneFormat::E164 => Some(normalized),
-        PhoneFormat::International => {
-            Some(format!("+{} {}", country_code, format_national_number(national_number, country)))
-        },
-        PhoneFormat::National => {
-            Some(format_national_number(national_number, country))
-        },
-        PhoneFormat::RFC3966 => {
-            Some(format!("tel:+{}-{}", country_code, national_number.chars().collect::<Vec<_>>().chunks(3).map(|chunk| chunk.iter().collect::<String>()).collect::<Vec<_>>().join("-")))
+        _ => {
+            let plen = prefix_digit_count(country.prefix);
+            let national_number = &normalized[1 + plen..];
+
+            match format {
+                PhoneFormat::International => {
+                    let formatted = format_national_number(national_number, country);
+                    let mut result = String::with_capacity(2 + plen + formatted.len());
+                    result.push('+');
+                    push_prefix_digits(&mut result, country.prefix);
+                    result.push(' ');
+                    result.push_str(&formatted);
+                    Some(result)
+                },
+                PhoneFormat::National => {
+                    Some(format_national_number(national_number, country))
+                },
+                PhoneFormat::RFC3966 => {
+                    let mut result = String::with_capacity(5 + normalized.len() + 4);
+                    result.push_str("tel:+");
+                    push_prefix_digits(&mut result, country.prefix);
+                    result.push('-');
+                    for (i, b) in national_number.bytes().enumerate() {
+                        if i > 0 && i % 3 == 0 {
+                            result.push('-');
+                        }
+                        result.push(b as char);
+                    }
+                    Some(result)
+                },
+                _ => unreachable!(),
+            }
         }
     }
 }
 
 fn format_national_number(number: &str, country: &Country) -> String {
-    // Simple formatting based on common patterns
     match country.code {
         "US" | "CA" => {
             if number.len() == 10 {
-                format!("({}) {}-{}", &number[0..3], &number[3..6], &number[6..])
+                // (XXX) XXX-XXXX = 14 chars
+                let mut s = String::with_capacity(14);
+                s.push('(');
+                s.push_str(&number[0..3]);
+                s.push_str(") ");
+                s.push_str(&number[3..6]);
+                s.push('-');
+                s.push_str(&number[6..]);
+                s
             } else {
                 number.to_string()
             }
         },
         "GB" => {
             if number.len() >= 10 {
-                format!("{} {} {}", &number[0..4], &number[4..7], &number[7..])
+                let mut s = String::with_capacity(number.len() + 2);
+                s.push_str(&number[0..4]);
+                s.push(' ');
+                s.push_str(&number[4..7]);
+                s.push(' ');
+                s.push_str(&number[7..]);
+                s
             } else {
                 number.to_string()
             }
         },
         "DE" => {
             if number.len() >= 10 {
-                format!("{} {}", &number[0..3], &number[3..])
+                let mut s = String::with_capacity(number.len() + 1);
+                s.push_str(&number[0..3]);
+                s.push(' ');
+                s.push_str(&number[3..]);
+                s
             } else {
                 number.to_string()
             }
         },
         _ => {
-            // Generic formatting for other countries
             if number.len() >= 7 {
                 let mid = number.len() / 2;
-                format!("{} {}", &number[0..mid], &number[mid..])
+                let mut s = String::with_capacity(number.len() + 1);
+                s.push_str(&number[0..mid]);
+                s.push(' ');
+                s.push_str(&number[mid..]);
+                s
             } else {
                 number.to_string()
             }
@@ -273,14 +363,7 @@ fn format_national_number(number: &str, country: &Country) -> String {
 /// // Returns Some(PhoneNumberType) if valid
 /// ```
 pub fn detect_phone_number_type(phone_number: &str) -> Option<PhoneNumberType> {
-    let normalized = normalize_phone_number(phone_number)?;
-    let country = extract_country(&normalized)?;
-    
-    // Remove the '+' and country code to get national number
-    let digits = &normalized[1..];
-    let national_number = &digits[count_digits(country.prefix)..];
-    
-    Some(classify_phone_number_type(national_number, country))
+    normalize_and_extract(phone_number).map(|(_, _, phone_type)| phone_type)
 }
 
 /// Check if a phone number is a mobile number
@@ -914,6 +997,40 @@ fn remove_non_digit_character(phone_number: &mut String) {
     phone_number.retain(|c| c.is_ascii_digit());
 }
 
+/// Strip extension markers (e.g., "ext. 1234", "ext 987") and everything after them.
+fn strip_extension(input: &str) -> &str {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    for i in 0..len {
+        if i + 4 <= len
+            && (bytes[i] == b'e' || bytes[i] == b'E')
+            && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
+            && (bytes[i + 2] == b't' || bytes[i + 2] == b'T')
+            && (bytes[i + 3] == b'.' || bytes[i + 3] == b' ')
+        {
+            return input[..i].trim_end();
+        }
+    }
+    input
+}
+
+/// Convert phone keypad vanity letters to digits (e.g., "FLOWERS" → "3569377").
+fn convert_vanity_letters(input: &str) -> String {
+    input.chars().map(|c| {
+        match c.to_ascii_uppercase() {
+            'A' | 'B' | 'C' => '2',
+            'D' | 'E' | 'F' => '3',
+            'G' | 'H' | 'I' => '4',
+            'J' | 'K' | 'L' => '5',
+            'M' | 'N' | 'O' => '6',
+            'P' | 'Q' | 'R' | 'S' => '7',
+            'T' | 'U' | 'V' => '8',
+            'W' | 'X' | 'Y' | 'Z' => '9',
+            _ => c,
+        }
+    }).collect()
+}
+
 fn leading_zero_remover(phone_number: &mut String) {
     // remove all leading zeros - more efficient approach
     let first_non_zero = phone_number.find(|c: char| c != '0').unwrap_or(phone_number.len());
@@ -923,33 +1040,82 @@ fn leading_zero_remover(phone_number: &mut String) {
 }
 
 fn extract_country_data(phone_number: &str) -> Option<&'static Country> {
-    // check if the phone number starts with country code or not and return country data if found
-    // Avoid string allocation by comparing digits directly
-    for country in COUNTRIES.iter() {
-        let prefix_digits = count_digits(country.prefix);
-        if phone_number.len() >= prefix_digits {
-            // Parse the beginning digits of phone_number and compare with prefix
-            if let Ok(parsed_prefix) = phone_number[0..prefix_digits].parse::<u32>() {
-                if parsed_prefix == country.prefix {
-                    let remaining_len = phone_number.len() - prefix_digits;
-                    if country.phone_lengths.contains(&(remaining_len as u8)) {
+    let bytes = phone_number.as_bytes();
+    let len = bytes.len();
+    if len == 0 { return None; }
+
+    let d0 = (bytes[0] - b'0') as u32;
+    if d0 > 9 { return None; }
+
+    let map = prefix_map();
+
+    // Try 1-digit prefix
+    if let Some(countries) = map.get(&d0) {
+        let remaining = len - 1;
+        for country in countries {
+            if country.phone_lengths.contains(&(remaining as u8)) {
+                return Some(country);
+            }
+        }
+    }
+
+    // Try 2-digit prefix
+    if len >= 2 {
+        let d1 = (bytes[1] - b'0') as u32;
+        if d1 <= 9 {
+            let prefix2 = d0 * 10 + d1;
+            if let Some(countries) = map.get(&prefix2) {
+                let remaining = len - 2;
+                for country in countries {
+                    if country.phone_lengths.contains(&(remaining as u8)) {
                         return Some(country);
                     }
                 }
             }
         }
     }
+
+    // Try 3-digit prefix
+    if len >= 3 {
+        let d1 = (bytes[1] - b'0') as u32;
+        let d2 = (bytes[2] - b'0') as u32;
+        if d1 <= 9 && d2 <= 9 {
+            let prefix3 = d0 * 100 + d1 * 10 + d2;
+            if let Some(countries) = map.get(&prefix3) {
+                let remaining = len - 3;
+                for country in countries {
+                    if country.phone_lengths.contains(&(remaining as u8)) {
+                        return Some(country);
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
-fn count_digits(mut n: u32) -> usize {
-    if n == 0 { return 1; }
-    let mut count = 0;
-    while n > 0 {
-        count += 1;
-        n /= 10;
+#[inline(always)]
+const fn prefix_digit_count(prefix: u32) -> usize {
+    if prefix >= 100 { 3 }
+    else if prefix >= 10 { 2 }
+    else { 1 }
+}
+
+/// Push a u32 country prefix as ASCII digits without allocating a String.
+#[inline(always)]
+fn push_prefix_digits(s: &mut String, prefix: u32) {
+    if prefix >= 100 {
+        s.push((b'0' + (prefix / 100) as u8) as char);
     }
-    count
+    if prefix >= 10 {
+        s.push((b'0' + ((prefix / 10) % 10) as u8) as char);
+    }
+    s.push((b'0' + (prefix % 10) as u8) as char);
+}
+
+fn count_digits(n: u32) -> usize {
+    prefix_digit_count(n)
 }
 
 // ============================================================================
@@ -1366,15 +1532,12 @@ impl PhoneNumber {
     /// * `Some(PhoneNumber)` - If the input is a valid phone number
     /// * `None` - If the input is invalid
     pub fn parse(input: &str) -> Option<Self> {
-        let normalized = normalize_phone_number(input)?;
-        let country = extract_country(&normalized);
-        let phone_type = detect_phone_number_type(&normalized);
-        
+        let (normalized, country, phone_type) = normalize_and_extract(input)?;
         Some(PhoneNumber {
             original: input.to_string(),
             normalized,
-            country,
-            phone_type,
+            country: Some(country),
+            phone_type: Some(phone_type),
         })
     }
     
@@ -1388,19 +1551,77 @@ impl PhoneNumber {
     /// * `Some(PhoneNumber)` - If the input is a valid phone number
     /// * `None` - If the input is invalid
     pub fn parse_with_country(input: &str, country_code: &str) -> Option<Self> {
-        // First try parsing as-is
-        if let Some(phone) = Self::parse(input) {
-            return Some(phone);
+        let country = COUNTRIES.iter().find(|c| c.code == country_code);
+
+        // Strip extension markers (e.g., "ext. 1234")
+        let without_ext = strip_extension(input);
+
+        // Convert vanity letters to digits (e.g., 1-800-FLOWERS)
+        let processed = convert_vanity_letters(without_ext);
+
+        // Try parsing as-is
+        if let Some(phone) = Self::parse(&processed) {
+            // If the hint country shares the same prefix as the parsed country
+            // (e.g., US and CA both use prefix 1), prefer the hint
+            let resolved_country = if let (Some(hint), Some(parsed)) = (country, phone.country) {
+                if hint.prefix == parsed.prefix && hint.code != parsed.code {
+                    Some(hint)
+                } else {
+                    phone.country
+                }
+            } else {
+                phone.country
+            };
+
+            if processed.trim_start().starts_with('+') {
+                return Some(PhoneNumber {
+                    original: input.to_string(),
+                    country: resolved_country,
+                    ..phone
+                });
+            }
+            // For national format, only accept if country matches hint
+            if country.map_or(true, |hint| resolved_country.map(|c| c.code) == Some(hint.code)) {
+                return Some(PhoneNumber {
+                    original: input.to_string(),
+                    country: resolved_country,
+                    ..phone
+                });
+            }
         }
-        
-        // Try adding country code
-        let country = COUNTRIES.iter().find(|c| c.code == country_code)?;
-        let mut cleaned = input.to_string();
+
+        let country = country?;
+        let mut cleaned = processed.to_string();
         remove_non_digit_character(&mut cleaned);
+
+        // Try stripping common IDD prefixes and parsing as international
+        for idd in &["0011", "011", "00"] {
+            if cleaned.starts_with(idd) && cleaned.len() > idd.len() + 5 {
+                let remaining = &cleaned[idd.len()..];
+                let with_plus = format!("+{}", remaining);
+                if let Some(mut phone) = Self::parse(&with_plus) {
+                    phone.original = input.to_string();
+                    return Some(phone);
+                }
+            }
+        }
+
+        // Try with country code, stripping trunk prefix (leading 0)
+        if cleaned.starts_with('0') {
+            let without_trunk = cleaned.trim_start_matches('0');
+            let with_country = format!("+{}{}", country.prefix, without_trunk);
+            if let Some(mut phone) = Self::parse(&with_country) {
+                phone.original = input.to_string();
+                phone.country = Some(country);
+                return Some(phone);
+            }
+        }
+
+        // Try with country code prepended as-is
         let with_country = format!("+{}{}", country.prefix, cleaned);
-        
         Self::parse(&with_country).map(|mut phone| {
             phone.original = input.to_string();
+            phone.country = Some(country);
             phone
         })
     }
@@ -1426,9 +1647,46 @@ impl PhoneNumber {
     }
     
     /// Format the phone number
-    pub fn format(&self, format: PhoneFormat) -> String {
-        format_phone_number(&self.normalized, format)
-            .unwrap_or_else(|| self.normalized.clone())
+    pub fn format(&self, fmt: PhoneFormat) -> String {
+        match fmt {
+            PhoneFormat::E164 => self.normalized.clone(),
+            _ => {
+                if let Some(country) = self.country {
+                    let plen = prefix_digit_count(country.prefix);
+                    let national = &self.normalized[1 + plen..];
+                    match fmt {
+                        PhoneFormat::International => {
+                            let formatted = format_national_number(national, country);
+                            let mut result = String::with_capacity(2 + plen + formatted.len());
+                            result.push('+');
+                            push_prefix_digits(&mut result, country.prefix);
+                            result.push(' ');
+                            result.push_str(&formatted);
+                            result
+                        }
+                        PhoneFormat::National => {
+                            format_national_number(national, country)
+                        }
+                        PhoneFormat::RFC3966 => {
+                            let mut result = String::with_capacity(5 + self.normalized.len() + 4);
+                            result.push_str("tel:+");
+                            push_prefix_digits(&mut result, country.prefix);
+                            result.push('-');
+                            for (i, b) in national.bytes().enumerate() {
+                                if i > 0 && i % 3 == 0 {
+                                    result.push('-');
+                                }
+                                result.push(b as char);
+                            }
+                            result
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    self.normalized.clone()
+                }
+            }
+        }
     }
     
     /// Check if this number is mobile

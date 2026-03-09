@@ -1,6 +1,6 @@
 [package]
 name = "phonelib"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
@@ -27,10 +27,22 @@ path = "src/lib.rs"
 [dependencies]
 
 [dev-dependencies]
-criterion = "0.8.1"
+criterion = "0.8.2"
+rlibphonenumber = "1.1.1"
+phonenumber = "0.3.9"
 
 [[bench]]
 name = "phone_benchmark"
+harness = false
+
+[[bench]]
+name = "competitors_format"
+path = "benches/competitors/format_bench.rs"
+harness = false
+
+[[bench]]
+name = "competitors_parse"
+path = "benches/competitors/parsing_bench.rs"
 harness = false
 
 [profile.release]

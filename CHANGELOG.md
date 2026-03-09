@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-03-09
+
+### Performance
+
+Major performance optimizations making phonelib the fastest phone number formatting library in the Rust ecosystem.
+
+- Eliminated redundant re-normalization in `PhoneNumber::format()` by using cached normalized data
+- Replaced all `format!()` macro usage in hot paths with `String::with_capacity()` + `push_str()`
+- Optimized country code prefix handling with `#[inline(always)] const fn` digit counting
+- Replaced `u32::to_string()` allocations with zero-alloc `push_prefix_digits()` helper
+- Optimized `extract_country_data()` with byte-level prefix comparison instead of `str::parse::<u32>()`
+
+### Added
+
+- Added `strip_extension()` for removing extension markers (e.g., "ext. 1234", "ext 987")
+- Added `convert_vanity_letters()` for phone keypad letter-to-digit conversion (e.g., "1-800-FLOWERS")
+- Added IDD prefix stripping in `parse_with_country()` (handles "0011", "011", "00" prefixes)
+- Added trunk prefix handling in `parse_with_country()` (strips leading 0 for national format numbers)
+- Added country hint validation - `parse_with_country()` now verifies parsed country matches the hint
+- Added Canada (CA) to the country database (prefix 1, 10-digit national numbers)
+- Added comparative benchmarks against `rlibphonenumber` and `rust-phonenumber` for parsing and formatting
+
+### Fixed
+
+- Fixed `parse_with_country()` incorrectly matching "(650) 253-0000" as Singapore instead of US
+- Fixed Argentina phone_lengths to include 11-digit mobile numbers
+
+### Changed
+
+- **Country data corrections (18 countries fixed):**
+  - Brazil (BR): Added 10-digit landline support (was mobile-only 11 digits)
+  - Italy (IT): Expanded phone lengths to [6-11] (was only [10])
+  - New Zealand (NZ): Expanded phone lengths to [8, 9, 10] (was only [8])
+  - Belgium (BE): Added 8-digit geographic number support
+  - China (CN): Expanded phone lengths to [7, 8, 10, 11] (was only [11])
+  - Vietnam (VN): Added 10-digit numbers (2018 number expansion)
+  - Iran (IR): Corrected phone lengths to [10] (removed incorrect 11)
+  - Turkey (TR): Corrected phone lengths to [10] (removed incorrect 11)
+  - Reunion (RE): Corrected phone lengths to [9] (was incorrect [10])
+  - Libya (LY): Expanded phone lengths to [8, 9, 10] (was only [10])
+  - Finland (FI): Expanded phone lengths to [5-12] (was only [9, 11])
+  - Taiwan (TW): Added 8-digit landline support (was only 9)
+  - Ireland (IE): Expanded phone lengths to [7, 8, 9] (was only [9])
+- **Country name updates:**
+  - "Swaziland" renamed to "Eswatini"
+  - "Macedonia, the Former Yugoslav Republic of" renamed to "North Macedonia"
+
 ## [1.0.0] - 2026-01-10
 
 ### First Stable Release

@@ -2107,4 +2107,420 @@ mod tests {
         // US numbers default to FixedLine in NANP
         assert!(is_landline_number(us_landline) || is_valid_phone_number(us_landline));
     }
+
+    // ========================================================================
+    // Worldwide coverage tests — 40+ countries across 6 continents
+    // ========================================================================
+
+    #[test]
+    fn test_validation_worldwide() {
+        let valid_numbers = vec![
+            // North America
+            ("+12025550173", "US"),
+            ("+14155552671", "US"),
+            ("+18005551234", "US toll-free"),
+            ("+14165550198", "CA"),
+            ("+15145551234", "CA"),
+            // UK
+            ("+442087654321", "GB"),
+            ("+447911123456", "GB"),
+            // Western Europe
+            ("+493012345678", "DE"),
+            ("+4915112345678", "DE mobile"),
+            ("+33123456789", "FR"),
+            ("+33612345678", "FR mobile"),
+            ("+34612345678", "ES"),
+            ("+41446681800", "CH"),
+            ("+31201234567", "NL"),
+            ("+32234567890", "BE"),
+            // Northern Europe
+            ("+4721234567", "NO"),
+            ("+46812345678", "SE"),
+            ("+4512345678", "DK"),
+            // Eastern/Southern Europe
+            ("+48221234567", "PL"),
+            ("+351212345678", "PT"),
+            ("+353123456789", "IE"),
+            ("+302101234567", "GR"),
+            ("+36123456789", "HU"),
+            ("+402112345678", "RO"),
+            ("+905321234567", "TR"),
+            ("+39123456789", "IT"),
+            // Asia-Pacific
+            ("+61412345678", "AU"),
+            ("+819012345678", "JP"),
+            ("+8613800138000", "CN"),
+            ("+919876543210", "IN"),
+            ("+82221234567", "KR"),
+            ("+6591234567", "SG"),
+            ("+66812345678", "TH"),
+            ("+85212345678", "HK"),
+            ("+639171234567", "PH"),
+            // Americas
+            ("+5511987654321", "BR"),
+            ("+525512345678", "MX"),
+            ("+541112345678", "AR"),
+            ("+56912345678", "CL"),
+            ("+571234567890", "CO"),
+            // Middle East
+            ("+971501234567", "AE"),
+            ("+972541234567", "IL"),
+            ("+966501234567", "SA"),
+            // Africa
+            ("+27211234567", "ZA"),
+            ("+2348012345678", "NG"),
+            ("+254712345678", "KE"),
+            ("+201012345678", "EG"),
+            // Russia/CIS
+            ("+79161234567", "RU"),
+            ("+77272501234", "KZ"),
+            // Oceania
+            ("+6491234567", "NZ"),
+            ("+64211234567", "NZ mobile"),
+        ];
+
+        for (number, label) in &valid_numbers {
+            assert!(
+                is_valid_phone_number(number),
+                "Expected {} ({}) to be valid",
+                number,
+                label
+            );
+        }
+
+        // Also verify normalization roundtrips
+        for (number, label) in &valid_numbers {
+            let normalized = normalize_phone_number(number);
+            assert!(
+                normalized.is_some(),
+                "Expected {} ({}) to normalize",
+                number,
+                label
+            );
+        }
+    }
+
+    #[test]
+    fn test_country_detection_worldwide() {
+        // Test extract_country for countries with unique prefix+length combos
+        let cases: Vec<(&str, &str)> = vec![
+            // Unique prefixes — unambiguous detection
+            ("+12025550173", "US"),         // prefix 1
+            ("+493012345678", "DE"),        // prefix 49
+            ("+33123456789", "FR"),         // prefix 33
+            ("+34612345678", "ES"),         // prefix 34
+            ("+41446681800", "CH"),         // prefix 41
+            ("+31201234567", "NL"),         // prefix 31
+            ("+32234567890", "BE"),         // prefix 32
+            ("+46812345678", "SE"),         // prefix 46
+            ("+4512345678", "DK"),          // prefix 45
+            ("+48221234567", "PL"),         // prefix 48
+            ("+351212345678", "PT"),        // prefix 351
+            ("+353123456789", "IE"),        // prefix 353
+            ("+302101234567", "GR"),        // prefix 30
+            ("+36123456789", "HU"),         // prefix 36
+            ("+402112345678", "RO"),        // prefix 40
+            ("+905321234567", "TR"),        // prefix 90
+            ("+61412345678", "AU"),         // prefix 61 (AU first in array)
+            ("+819012345678", "JP"),        // prefix 81
+            ("+8613800138000", "CN"),       // prefix 86
+            ("+919876543210", "IN"),        // prefix 91
+            ("+82221234567", "KR"),         // prefix 82
+            ("+6591234567", "SG"),          // prefix 65
+            ("+66812345678", "TH"),         // prefix 66
+            ("+85212345678", "HK"),         // prefix 852
+            ("+639171234567", "PH"),        // prefix 63
+            ("+5511987654321", "BR"),       // prefix 55
+            ("+525512345678", "MX"),        // prefix 52
+            ("+56912345678", "CL"),         // prefix 56
+            ("+571234567890", "CO"),        // prefix 57
+            ("+971501234567", "AE"),        // prefix 971
+            ("+966501234567", "SA"),        // prefix 966
+            ("+972541234567", "IL"),        // prefix 972
+            ("+27211234567", "ZA"),         // prefix 27
+            ("+254712345678", "KE"),        // prefix 254
+            ("+201012345678", "EG"),        // prefix 20
+            ("+2348012345678", "NG"),       // prefix 234
+            ("+6491234567", "NZ"),          // prefix 64
+            ("+4721234567", "NO"),          // prefix 47, 8 digits (NO first)
+        ];
+
+        for (number, expected_code) in cases {
+            let country = extract_country(number);
+            assert!(
+                country.is_some(),
+                "Failed to detect country for {}",
+                number
+            );
+            assert_eq!(
+                country.unwrap().code, expected_code,
+                "Wrong country for {}: expected {}, got {}",
+                number, expected_code, country.unwrap().code
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_with_country_worldwide() {
+        // Shared-prefix countries resolved via country hint
+        let shared_prefix_cases: Vec<(&str, &str, &str)> = vec![
+            // US vs CA (prefix 1)
+            ("+14165550198", "CA", "CA"),
+            ("+12025550173", "US", "US"),
+            // RU vs KZ (prefix 7)
+            ("+79161234567", "RU", "RU"),
+            ("+77272501234", "KZ", "KZ"),
+            // GB (prefix 44, resolves via hint over GB-CYM)
+            ("+442087654321", "GB", "GB"),
+            ("+447911123456", "GB", "GB"),
+        ];
+
+        for (number, hint, expected_code) in shared_prefix_cases {
+            let phone = crate::PhoneNumber::parse_with_country(number, hint);
+            assert!(
+                phone.is_some(),
+                "Failed to parse {} with hint {}",
+                number, hint
+            );
+            assert_eq!(
+                phone.as_ref().unwrap().country.unwrap().code,
+                expected_code,
+                "Wrong country for {} with hint {}: got {}",
+                number,
+                hint,
+                phone.unwrap().country.unwrap().code
+            );
+        }
+
+        // National format numbers with country hint
+        let national_cases: Vec<(&str, &str, &str)> = vec![
+            // (input, country_hint, expected_e164)
+            ("(202) 555-0173", "US", "+12025550173"),
+            ("416-555-0198", "CA", "+14165550198"),
+            ("020 8765 4321", "GB", "+442087654321"),
+            ("030 12345678", "DE", "+493012345678"),
+            ("0412 345 678", "AU", "+61412345678"),
+        ];
+
+        for (input, country, expected_e164) in national_cases {
+            let phone = crate::PhoneNumber::parse_with_country(input, country);
+            assert!(
+                phone.is_some(),
+                "Failed to parse '{}' with country '{}'",
+                input, country
+            );
+            let p = phone.unwrap();
+            assert_eq!(
+                p.e164(),
+                expected_e164,
+                "Wrong E.164 for '{}' with country '{}': got {}",
+                input, country, p.e164()
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalization_formats_worldwide() {
+        // Verify normalization handles different input formats correctly
+        let cases: Vec<(&str, &str)> = vec![
+            // Already E.164 — should roundtrip
+            ("+12025550173", "+12025550173"),
+            ("+493012345678", "+493012345678"),
+            ("+33123456789", "+33123456789"),
+            ("+8613800138000", "+8613800138000"),
+            ("+919876543210", "+919876543210"),
+            ("+79161234567", "+79161234567"),
+            ("+972541234567", "+972541234567"),
+            ("+85212345678", "+85212345678"),
+            ("+639171234567", "+639171234567"),
+            ("+254712345678", "+254712345678"),
+            // With formatting characters — should clean to E.164
+            ("+1 202 555 0173", "+12025550173"),
+            ("+49 30 1234 5678", "+493012345678"),
+            ("+86 138 0013 8000", "+8613800138000"),
+            ("+91 98765 43210", "+919876543210"),
+            ("+7 916 123 4567", "+79161234567"),
+            ("+65 9123 4567", "+6591234567"),
+            ("+52 55 1234 5678", "+525512345678"),
+            ("+972 54 123 4567", "+972541234567"),
+            ("+27 21 123 4567", "+27211234567"),
+            // Without + prefix (digits only)
+            ("12025550173", "+12025550173"),
+            ("493012345678", "+493012345678"),
+            ("8613800138000", "+8613800138000"),
+        ];
+
+        for (input, expected) in cases {
+            let result = normalize_phone_number(input);
+            assert_eq!(
+                result.as_deref(),
+                Some(expected),
+                "Normalization of '{}' failed: got {:?}",
+                input,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_all_types_worldwide() {
+        // Verify all 4 format types work for diverse countries
+        let numbers = vec![
+            "+12025550173",    // US
+            "+493012345678",   // DE
+            "+33123456789",    // FR
+            "+34612345678",    // ES
+            "+41446681800",    // CH
+            "+31201234567",    // NL
+            "+61412345678",    // AU
+            "+8613800138000",  // CN
+            "+919876543210",   // IN
+            "+819012345678",   // JP
+            "+82221234567",    // KR
+            "+6591234567",     // SG
+            "+66812345678",    // TH
+            "+85212345678",    // HK
+            "+525512345678",   // MX
+            "+971501234567",   // AE
+            "+972541234567",   // IL
+            "+27211234567",    // ZA
+            "+302101234567",   // GR
+            "+48221234567",    // PL
+            "+351212345678",   // PT
+            "+905321234567",   // TR
+            "+56912345678",    // CL
+            "+254712345678",   // KE
+            "+6491234567",     // NZ
+        ];
+
+        for number in &numbers {
+            // E164
+            let e164 = format_phone_number(number, PhoneFormat::E164);
+            assert!(e164.is_some(), "E164 failed for {}", number);
+            assert!(
+                e164.as_ref().unwrap().starts_with('+'),
+                "E164 should start with + for {}",
+                number
+            );
+
+            // International
+            let intl = format_phone_number(number, PhoneFormat::International);
+            assert!(intl.is_some(), "International failed for {}", number);
+            assert!(
+                intl.as_ref().unwrap().starts_with('+'),
+                "International should start with + for {}",
+                number
+            );
+            assert!(
+                intl.as_ref().unwrap().contains(' '),
+                "International should contain space for {}",
+                number
+            );
+
+            // National
+            let national = format_phone_number(number, PhoneFormat::National);
+            assert!(national.is_some(), "National failed for {}", number);
+            assert!(
+                !national.as_ref().unwrap().starts_with('+'),
+                "National should not start with + for {}",
+                number
+            );
+
+            // RFC3966
+            let rfc = format_phone_number(number, PhoneFormat::RFC3966);
+            assert!(rfc.is_some(), "RFC3966 failed for {}", number);
+            assert!(
+                rfc.as_ref().unwrap().starts_with("tel:+"),
+                "RFC3966 should start with tel:+ for {}",
+                number
+            );
+        }
+    }
+
+    #[test]
+    fn test_phone_number_struct_fields_worldwide() {
+        // Verify PhoneNumber struct fields for diverse countries
+        let cases: Vec<(&str, &str, u32)> = vec![
+            ("+12025550173", "US", 1),
+            ("+493012345678", "DE", 49),
+            ("+33123456789", "FR", 33),
+            ("+34612345678", "ES", 34),
+            ("+41446681800", "CH", 41),
+            ("+61412345678", "AU", 61),
+            ("+8613800138000", "CN", 86),
+            ("+919876543210", "IN", 91),
+            ("+819012345678", "JP", 81),
+            ("+6591234567", "SG", 65),
+            ("+66812345678", "TH", 66),
+            ("+85212345678", "HK", 852),
+            ("+639171234567", "PH", 63),
+            ("+525512345678", "MX", 52),
+            ("+56912345678", "CL", 56),
+            ("+571234567890", "CO", 57),
+            ("+971501234567", "AE", 971),
+            ("+972541234567", "IL", 972),
+            ("+966501234567", "SA", 966),
+            ("+27211234567", "ZA", 27),
+            ("+254712345678", "KE", 254),
+            ("+201012345678", "EG", 20),
+            ("+302101234567", "GR", 30),
+            ("+48221234567", "PL", 48),
+            ("+351212345678", "PT", 351),
+            ("+6491234567", "NZ", 64),
+        ];
+
+        for (number, expected_code, expected_prefix) in cases {
+            let phone = crate::PhoneNumber::parse(number);
+            assert!(phone.is_some(), "Failed to parse {}", number);
+            let phone = phone.unwrap();
+
+            assert_eq!(
+                phone.country.unwrap().code, expected_code,
+                "Wrong country for {}",
+                number
+            );
+            assert_eq!(
+                phone.country_code(),
+                Some(expected_prefix),
+                "Wrong prefix for {}",
+                number
+            );
+            assert_eq!(phone.e164(), number, "E164 mismatch for {}", number);
+
+            let national = phone.national_number();
+            assert!(
+                !national.is_empty(),
+                "Empty national number for {}",
+                number
+            );
+            assert!(
+                national.chars().all(|c| c.is_ascii_digit()),
+                "National number should be all digits for {}",
+                number
+            );
+        }
+    }
+
+    #[test]
+    fn test_equality_across_formats_worldwide() {
+        // Numbers in different formats should be equal after normalization
+        let equivalent_pairs: Vec<(&str, &str)> = vec![
+            ("+12025550173", "12025550173"),
+            ("+12025550173", "+1 202 555 0173"),
+            ("+493012345678", "493012345678"),
+            ("+493012345678", "+49 30 1234 5678"),
+            ("+8613800138000", "8613800138000"),
+            ("+8613800138000", "+86 138 0013 8000"),
+            ("+919876543210", "+91 98765 43210"),
+            ("+79161234567", "+7 916 123 4567"),
+        ];
+
+        for (a, b) in equivalent_pairs {
+            assert!(
+                are_phone_numbers_equal(a, b),
+                "'{}' and '{}' should be equal",
+                a, b
+            );
+        }
+    }
 }

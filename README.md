@@ -21,13 +21,32 @@ Phonelib is a comprehensive Rust library for handling phone numbers. It provides
 - 🔍 **Smart Suggestions** - Get correction suggestions for invalid numbers
 - 🔒 **Privacy Tools** - Redact phone numbers in text
 
+## Performance
+
+Phonelib is the fastest phone number formatting library in the Rust ecosystem.
+
+**Formatting** (vs rlibphonenumber v1.1.1 and rust-phonenumber v0.3.9):
+
+| Format | phonelib | rlibphonenumber | rust-phonenumber | Speedup vs fastest competitor |
+|--------|----------|-----------------|------------------|-------------------------------|
+| E164 | **~32ns** | ~50ns | ~1.07µs | 1.6x faster |
+| International | **~63ns** | ~662ns | ~1.48µs | 10.5x faster |
+| National | **~31ns** | ~855ns | ~1.69µs | 27.6x faster |
+| RFC3966 | **~54ns** | ~704ns | ~1.80µs | 13.0x faster |
+
+**Parsing:**
+
+| Operation | phonelib | rlibphonenumber | rust-phonenumber |
+|-----------|----------|-----------------|------------------|
+| parse() | ~2.57µs | ~980ns | ~2.97µs |
+
 ## Installation
 
 Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phonelib = "1.0.1"
+phonelib = "1.1.0"
 ```
 
 ## Quick Start
@@ -385,7 +404,7 @@ assert_eq!(set.len(), 2);
 
 ## Country Support
 
-The library supports **246 countries** with accurate:
+The library supports **248 countries** with accurate:
 - Country codes and prefixes
 - Valid phone number lengths
 - Mobile vs. landline detection patterns
@@ -485,11 +504,21 @@ cargo clippy
 
 ## Changelog
 
+### v1.1.0 (Latest)
+
+**Performance & Data Quality Release**
+
+- Major formatting performance optimizations (up to 27.6x faster than competitors)
+- Added `strip_extension()`, `convert_vanity_letters()`, IDD prefix stripping, trunk prefix handling
+- Added Canada (CA) to the country database
+- Fixed country data for 18 countries (Brazil, Italy, China, New Zealand, Israel, Belgium, Vietnam, Iran, Turkey, Reunion, Libya, Finland, Taiwan, Ireland, and more)
+- Updated country names: Swaziland → Eswatini, Macedonia → North Macedonia
+
 ### v1.0.1
 **Minor Bug Fixes**
 - Fixed edge case in phone number normalization for certain country codes
 
-### v1.0.0 (Latest)
+### v1.0.0
 
 **First Stable Release**
 

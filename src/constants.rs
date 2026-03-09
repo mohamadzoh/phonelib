@@ -2,7 +2,7 @@ use crate::definitions;
 
 use definitions::Country;
 
-pub const COUNTRIES: [Country; 247] = [
+pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Andorra",
         code: "AD",
@@ -66,7 +66,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Argentina",
         code: "AR",
-        phone_lengths: &[6, 7, 8, 10],
+        phone_lengths: &[6, 7, 8, 10, 11],
         prefix: 54,
     },
     Country {
@@ -126,7 +126,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Belgium",
         code: "BE",
-        phone_lengths: &[9, 10],
+        phone_lengths: &[8, 9, 10],
         prefix: 32,
     },
     Country {
@@ -156,7 +156,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Israel",
         code: "IL",
-        phone_lengths: &[9],
+        phone_lengths: &[8, 9],
         prefix: 972,
     },
     Country {
@@ -198,7 +198,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Brazil",
         code: "BR",
-        phone_lengths: &[11],
+        phone_lengths: &[10, 11],
         prefix: 55,
     },
     Country {
@@ -294,7 +294,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "China",
         code: "CN",
-        phone_lengths: &[11],
+        phone_lengths: &[7, 8, 10, 11],
         prefix: 86,
     },
     Country {
@@ -432,7 +432,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Finland",
         code: "FI",
-        phone_lengths: &[9, 11],
+        phone_lengths: &[5, 6, 7, 8, 9, 10, 11, 12],
         prefix: 358,
     },
     Country {
@@ -624,7 +624,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Ireland",
         code: "IE",
-        phone_lengths: &[9],
+        phone_lengths: &[7, 8, 9],
         prefix: 353,
     },
     Country {
@@ -654,7 +654,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Iran",
         code: "IR",
-        phone_lengths: &[11, 10],
+        phone_lengths: &[10],
         prefix: 98,
     },
     Country {
@@ -666,7 +666,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Italy",
         code: "IT",
-        phone_lengths: &[10],
+        phone_lengths: &[6, 7, 8, 9, 10, 11],
         prefix: 39,
     },
     Country {
@@ -822,7 +822,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Libya",
         code: "LY",
-        phone_lengths: &[10],
+        phone_lengths: &[8, 9, 10],
         prefix: 218,
     },
     Country {
@@ -868,7 +868,7 @@ pub const COUNTRIES: [Country; 247] = [
         prefix: 692,
     },
     Country {
-        name: "Macedonia, the Former Yugoslav Republic of",
+        name: "North Macedonia",
         code: "MK",
         phone_lengths: &[8],
         prefix: 389,
@@ -1032,7 +1032,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "New Zealand",
         code: "NZ",
-        phone_lengths: &[8],
+        phone_lengths: &[8, 9, 10],
         prefix: 64,
     },
     Country {
@@ -1122,7 +1122,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Reunion",
         code: "RE",
-        phone_lengths: &[10],
+        phone_lengths: &[9],
         prefix: 262,
     },
     Country {
@@ -1270,7 +1270,7 @@ pub const COUNTRIES: [Country; 247] = [
         prefix: 963,
     },
     Country {
-        name: "Swaziland",
+        name: "Eswatini",
         code: "SZ",
         phone_lengths: &[8],
         prefix: 268,
@@ -1344,7 +1344,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Turkey",
         code: "TR",
-        phone_lengths: &[10, 11],
+        phone_lengths: &[10],
         prefix: 90,
     },
     Country {
@@ -1362,7 +1362,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Taiwan",
         code: "TW",
-        phone_lengths: &[9],
+        phone_lengths: &[8, 9],
         prefix: 886,
     },
     Country {
@@ -1386,6 +1386,12 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "United States",
         code: "US",
+        phone_lengths: &[10],
+        prefix: 1,
+    },
+    Country {
+        name: "Canada",
+        code: "CA",
         phone_lengths: &[10],
         prefix: 1,
     },
@@ -1434,7 +1440,7 @@ pub const COUNTRIES: [Country; 247] = [
     Country {
         name: "Vietnam",
         code: "VN",
-        phone_lengths: &[9],
+        phone_lengths: &[9, 10],
         prefix: 84,
     },
     Country {
