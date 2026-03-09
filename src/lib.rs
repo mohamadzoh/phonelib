@@ -37,7 +37,6 @@
 //! assert_eq!(num1, num2);
 //! ```
 
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use constants::COUNTRIES;
@@ -49,14 +48,29 @@ mod constants;
 mod definitions;
 mod tests;
 
-fn prefix_map() -> &'static HashMap<u32, Vec<&'static Country>> {
-    static MAP: OnceLock<HashMap<u32, Vec<&'static Country>>> = OnceLock::new();
-    MAP.get_or_init(|| {
-        let mut map = HashMap::with_capacity(256);
+struct CountryEntry {
+    country: &'static Country,
+    length_mask: u32,
+}
+
+fn prefix_table() -> &'static [Vec<CountryEntry>] {
+    static TABLE: OnceLock<Vec<Vec<CountryEntry>>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table: Vec<Vec<CountryEntry>> = (0..1000).map(|_| Vec::new()).collect();
         for country in COUNTRIES.iter() {
-            map.entry(country.prefix).or_insert_with(Vec::new).push(country);
+            // Only index prefixes up to 3 digits; extract_country_data
+            // only tries 1/2/3-digit prefix lookups.
+            if country.prefix >= 1000 { continue; }
+            let mut mask = 0u32;
+            for &len in country.phone_lengths {
+                mask |= 1u32 << (len as u32);
+            }
+            table[country.prefix as usize].push(CountryEntry {
+                country,
+                length_mask: mask,
+            });
         }
-        map
+        table
     })
 }
 
@@ -185,7 +199,10 @@ fn normalize_and_extract(input: &str) -> Option<(String, &'static Country, Phone
     // Extract digits into stack buffer (avoids heap allocation for cleaning)
     let mut digits = [0u8; 20];
     let mut digit_count = 0;
-    for &b in input.as_bytes() {
+    let input_bytes = input.as_bytes();
+    // Skip leading '+' if present
+    let scan_start = if input_bytes.first() == Some(&b'+') { 1 } else { 0 };
+    for &b in &input_bytes[scan_start..] {
         if b.is_ascii_digit() {
             if digit_count >= 20 { return None; }
             digits[digit_count] = b;
@@ -194,18 +211,28 @@ fn normalize_and_extract(input: &str) -> Option<(String, &'static Country, Phone
     }
 
     // Skip leading zeros
-    let start = digits[..digit_count].iter().position(|&b| b != b'0').unwrap_or(digit_count);
-    let cleaned = std::str::from_utf8(&digits[start..digit_count]).ok()?;
-    if cleaned.is_empty() { return None; }
+    let mut start = 0;
+    while start < digit_count && digits[start] == b'0' {
+        start += 1;
+    }
+    if start >= digit_count { return None; }
+
+    // SAFETY: buffer contains only ASCII digit bytes (0x30..=0x39), which are valid UTF-8
+    let cleaned = unsafe { std::str::from_utf8_unchecked(&digits[start..digit_count]) };
 
     let country = extract_country_data(cleaned)?;
 
     let plen = prefix_digit_count(country.prefix);
-    let after_prefix = &cleaned[plen..];
+    let national_bytes = &digits[start + plen..digit_count];
 
-    // Remove leading zeros from national part (trunk prefix after country code)
-    let nat_start = after_prefix.as_bytes().iter().position(|&b| b != b'0').unwrap_or(after_prefix.len());
-    let national = &after_prefix[nat_start..];
+    // Skip leading zeros in national part (trunk prefix)
+    let mut nat_start = 0;
+    while nat_start < national_bytes.len() && national_bytes[nat_start] == b'0' {
+        nat_start += 1;
+    }
+
+    // SAFETY: sub-slice of ASCII digit buffer
+    let national = unsafe { std::str::from_utf8_unchecked(&national_bytes[nat_start..]) };
 
     // Classify type from national number
     let phone_type = classify_phone_number_type(national, country);
@@ -403,33 +430,32 @@ pub fn is_toll_free_number(phone_number: &str) -> bool {
 }
 
 fn classify_phone_number_type(national_number: &str, country: &Country) -> PhoneNumberType {
-    if national_number.is_empty() {
+    let bytes = national_number.as_bytes();
+    if bytes.is_empty() {
         return PhoneNumberType::Unknown;
     }
-    
-    let first_digit = national_number.chars().next().unwrap();
-    let first_two = if national_number.len() >= 2 {
-        &national_number[0..2]
+
+    let d0 = bytes[0];
+    // Compute numeric prefix values for fast matching
+    let n2: u16 = if bytes.len() >= 2 {
+        (bytes[0] - b'0') as u16 * 10 + (bytes[1] - b'0') as u16
     } else {
-        national_number
+        u16::MAX
     };
-    let first_three = if national_number.len() >= 3 {
-        &national_number[0..3]
+    let n3: u16 = if bytes.len() >= 3 {
+        (bytes[0] - b'0') as u16 * 100 + (bytes[1] - b'0') as u16 * 10 + (bytes[2] - b'0') as u16
     } else {
-        national_number
+        u16::MAX
     };
-    
+
     match country.code {
         "US" | "CA" => {
-            // North American Numbering Plan
-            match first_three {
-                "800" | "833" | "844" | "855" | "866" | "877" | "888" => PhoneNumberType::TollFree,
-                "900" | "976" => PhoneNumberType::PremiumRate,
+            match n3 {
+                800 | 833 | 844 | 855 | 866 | 877 | 888 => PhoneNumberType::TollFree,
+                900 | 976 => PhoneNumberType::PremiumRate,
                 _ => {
-                    // In NANP, mobile and landline numbers use the same format
-                    // This is a simplified classification
-                    if national_number.len() == 10 {
-                        PhoneNumberType::FixedLine // Default to fixed line for NANP
+                    if bytes.len() == 10 {
+                        PhoneNumberType::FixedLine
                     } else {
                         PhoneNumberType::Unknown
                     }
@@ -437,65 +463,63 @@ fn classify_phone_number_type(national_number: &str, country: &Country) -> Phone
             }
         },
         "GB" => {
-            match first_two {
-                "07" => PhoneNumberType::Mobile,
-                "08" => match first_three {
-                    "080" | "084" | "087" => PhoneNumberType::TollFree,
-                    "081" | "082" | "089" => PhoneNumberType::PremiumRate,
+            match n2 {
+                7 => PhoneNumberType::Mobile,
+                8 => match n3 {
+                    80 | 84 | 87 => PhoneNumberType::TollFree,
+                    81 | 82 | 89 => PhoneNumberType::PremiumRate,
                     _ => PhoneNumberType::SharedCost,
                 },
-                "01" | "02" => PhoneNumberType::FixedLine,
-                "03" => PhoneNumberType::Uan,
-                "05" => PhoneNumberType::Voip,
+                1 | 2 => PhoneNumberType::FixedLine,
+                3 => PhoneNumberType::Uan,
+                5 => PhoneNumberType::Voip,
                 _ => PhoneNumberType::Unknown,
             }
         },
         "DE" => {
-            match first_digit {
-                '1' => match first_two {
-                    "15" | "16" | "17" => PhoneNumberType::Mobile,
-                    "18" => PhoneNumberType::SharedCost,
-                    "19" => PhoneNumberType::PremiumRate,
+            match d0 {
+                b'1' => match n2 {
+                    15 | 16 | 17 => PhoneNumberType::Mobile,
+                    18 => PhoneNumberType::SharedCost,
+                    19 => PhoneNumberType::PremiumRate,
                     _ => PhoneNumberType::Unknown,
                 },
-                '0' => PhoneNumberType::TollFree,
+                b'0' => PhoneNumberType::TollFree,
                 _ => PhoneNumberType::FixedLine,
             }
         },
         "FR" => {
-            match first_digit {
-                '6' | '7' => PhoneNumberType::Mobile,
-                '8' => PhoneNumberType::TollFree,
-                '1' | '2' | '3' | '4' | '5' | '9' => PhoneNumberType::FixedLine,
+            match d0 {
+                b'6' | b'7' => PhoneNumberType::Mobile,
+                b'8' => PhoneNumberType::TollFree,
+                b'1' | b'2' | b'3' | b'4' | b'5' | b'9' => PhoneNumberType::FixedLine,
                 _ => PhoneNumberType::Unknown,
             }
         },
         "AU" => {
-            match first_digit {
-                '4' => PhoneNumberType::Mobile,
-                '1' => match first_three {
-                    "180" | "188" => PhoneNumberType::TollFree,
-                    "190" => PhoneNumberType::PremiumRate,
+            match d0 {
+                b'4' => PhoneNumberType::Mobile,
+                b'1' => match n3 {
+                    180 | 188 => PhoneNumberType::TollFree,
+                    190 => PhoneNumberType::PremiumRate,
                     _ => PhoneNumberType::Unknown,
                 },
-                '2' | '3' | '7' | '8' => PhoneNumberType::FixedLine,
+                b'2' | b'3' | b'7' | b'8' => PhoneNumberType::FixedLine,
                 _ => PhoneNumberType::Unknown,
             }
         },
         "IN" => {
-            match first_digit {
-                '9' | '8' | '7' | '6' => PhoneNumberType::Mobile,
-                '1' | '2' | '3' | '4' | '5' => PhoneNumberType::FixedLine,
+            match d0 {
+                b'9' | b'8' | b'7' | b'6' => PhoneNumberType::Mobile,
+                b'1' | b'2' | b'3' | b'4' | b'5' => PhoneNumberType::FixedLine,
                 _ => PhoneNumberType::Unknown,
             }
         },
         _ => {
-            // Generic classification for other countries
-            // This is a very basic heuristic
-            match first_digit {
-                '9' | '8' | '7' | '6' => PhoneNumberType::Mobile,
-                '1' | '2' | '3' | '4' | '5' => PhoneNumberType::FixedLine,
-                '0' => PhoneNumberType::TollFree,
+            match d0 {
+                b'9' | b'8' | b'7' | b'6' => PhoneNumberType::Mobile,
+                b'1' | b'2' | b'3' | b'4' | b'5' => PhoneNumberType::FixedLine,
+                b'0' => PhoneNumberType::TollFree,
                 _ => PhoneNumberType::Unknown,
             }
         }
@@ -1044,48 +1068,51 @@ fn extract_country_data(phone_number: &str) -> Option<&'static Country> {
     let len = bytes.len();
     if len == 0 { return None; }
 
+    let table = prefix_table();
+
     let d0 = (bytes[0] - b'0') as u32;
     if d0 > 9 { return None; }
 
-    let map = prefix_map();
-
     // Try 1-digit prefix
-    if let Some(countries) = map.get(&d0) {
-        let remaining = len - 1;
-        for country in countries {
-            if country.phone_lengths.contains(&(remaining as u8)) {
-                return Some(country);
+    let remaining = len - 1;
+    if remaining < 32 {
+        let bit = 1u32 << remaining;
+        for entry in &table[d0 as usize] {
+            if entry.length_mask & bit != 0 {
+                return Some(entry.country);
             }
         }
     }
 
-    // Try 2-digit prefix
     if len >= 2 {
         let d1 = (bytes[1] - b'0') as u32;
         if d1 <= 9 {
             let prefix2 = d0 * 10 + d1;
-            if let Some(countries) = map.get(&prefix2) {
-                let remaining = len - 2;
-                for country in countries {
-                    if country.phone_lengths.contains(&(remaining as u8)) {
-                        return Some(country);
+
+            // Try 2-digit prefix
+            let remaining = len - 2;
+            if remaining < 32 {
+                let bit = 1u32 << remaining;
+                for entry in &table[prefix2 as usize] {
+                    if entry.length_mask & bit != 0 {
+                        return Some(entry.country);
                     }
                 }
             }
-        }
-    }
 
-    // Try 3-digit prefix
-    if len >= 3 {
-        let d1 = (bytes[1] - b'0') as u32;
-        let d2 = (bytes[2] - b'0') as u32;
-        if d1 <= 9 && d2 <= 9 {
-            let prefix3 = d0 * 100 + d1 * 10 + d2;
-            if let Some(countries) = map.get(&prefix3) {
-                let remaining = len - 3;
-                for country in countries {
-                    if country.phone_lengths.contains(&(remaining as u8)) {
-                        return Some(country);
+            // Try 3-digit prefix
+            if len >= 3 {
+                let d2 = (bytes[2] - b'0') as u32;
+                if d2 <= 9 {
+                    let prefix3 = prefix2 * 10 + d2;
+                    let remaining = len - 3;
+                    if remaining < 32 {
+                        let bit = 1u32 << remaining;
+                        for entry in &table[prefix3 as usize] {
+                            if entry.length_mask & bit != 0 {
+                                return Some(entry.country);
+                            }
+                        }
                     }
                 }
             }
