@@ -37,7 +37,10 @@
 //! assert_eq!(num1, num2);
 //! ```
 
-use std::sync::OnceLock;
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use constants::COUNTRIES;
 use definitions::Country;
@@ -72,6 +75,38 @@ fn prefix_table() -> &'static [Vec<CountryEntry>] {
         }
         table
     })
+}
+
+fn random_seed() -> u64 {
+    static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let time_seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let counter = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    time_seed ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+fn next_random_digit(seed: &mut u64) -> u8 {
+    *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+    ((*seed / 65536) % 10) as u8
+}
+
+fn generate_random_national_number(length: usize, allow_leading_zero: bool, seed: &mut u64) -> String {
+    let mut national_number = String::with_capacity(length);
+
+    for index in 0..length {
+        let mut digit = next_random_digit(seed);
+        if index == 0 && digit == 0 && !allow_leading_zero {
+            digit = 1;
+        }
+
+        national_number.push(char::from(b'0' + digit));
+    }
+
+    national_number
 }
 
 /// Validates whether a phone number is valid.
@@ -123,9 +158,7 @@ pub fn is_valid_phone_number(phone_number: &str) -> bool {
 /// assert_eq!(country.unwrap().code, "US");
 /// ```
 pub fn extract_country(phone_number: &str) -> Option<&'static Country> {
-    let mut phone_number = phone_number.to_string();
-    remove_unwanted_character(&mut phone_number);
-    extract_country_data(&phone_number)
+    normalize_and_extract(phone_number).map(|(_, country, _)| country)
 }
 
 /// Normalizes a phone number to E.164 format.
@@ -172,6 +205,15 @@ pub fn normalize_phone_number(phone_number: &str) -> Option<String> {
 /// assert_eq!(normalized, Some("+12025550173".to_string()));
 /// ```
 pub fn normalize_phone_number_in_place(phone_number: &mut String) -> Option<String> {
+    let stripped_len = strip_extension(phone_number).len();
+    phone_number.truncate(stripped_len);
+
+    if phone_number.bytes().any(|byte| byte.is_ascii_alphabetic()) {
+        let converted = convert_vanity_letters(phone_number);
+        phone_number.clear();
+        phone_number.push_str(&converted);
+    }
+
     remove_unwanted_character(phone_number);
 
     // extract country data
@@ -196,10 +238,19 @@ pub fn normalize_phone_number_in_place(phone_number: &mut String) -> Option<Stri
 /// Internal: normalize input and extract all metadata in a single pass.
 /// Avoids redundant normalization and country lookups.
 fn normalize_and_extract(input: &str) -> Option<(String, &'static Country, PhoneNumberType)> {
+    let stripped = strip_extension(input);
+    let processed_storage;
+    let processed_input = if stripped.bytes().any(|byte| byte.is_ascii_alphabetic()) {
+        processed_storage = convert_vanity_letters(stripped);
+        processed_storage.as_str()
+    } else {
+        stripped
+    };
+
     // Extract digits into stack buffer (avoids heap allocation for cleaning)
     let mut digits = [0u8; 20];
     let mut digit_count = 0;
-    let input_bytes = input.as_bytes();
+    let input_bytes = processed_input.as_bytes();
     // Skip leading '+' if present
     let scan_start = if input_bytes.first() == Some(&b'+') { 1 } else { 0 };
     for &b in &input_bytes[scan_start..] {
@@ -319,58 +370,74 @@ pub fn format_phone_number(phone_number: &str, format: PhoneFormat) -> Option<St
 
 fn format_national_number(number: &str, country: &Country) -> String {
     match country.code {
-        "US" | "CA" => {
-            if number.len() == 10 {
-                // (XXX) XXX-XXXX = 14 chars
-                let mut s = String::with_capacity(14);
-                s.push('(');
-                s.push_str(&number[0..3]);
-                s.push_str(") ");
-                s.push_str(&number[3..6]);
-                s.push('-');
-                s.push_str(&number[6..]);
-                s
-            } else {
-                number.to_string()
-            }
-        },
-        "GB" => {
-            if number.len() >= 10 {
-                let mut s = String::with_capacity(number.len() + 2);
-                s.push_str(&number[0..4]);
-                s.push(' ');
-                s.push_str(&number[4..7]);
-                s.push(' ');
-                s.push_str(&number[7..]);
-                s
-            } else {
-                number.to_string()
-            }
-        },
-        "DE" => {
-            if number.len() >= 10 {
-                let mut s = String::with_capacity(number.len() + 1);
-                s.push_str(&number[0..3]);
-                s.push(' ');
-                s.push_str(&number[3..]);
-                s
-            } else {
-                number.to_string()
-            }
-        },
+        "US" | "CA" if number.len() == 10 => {
+            // (XXX) XXX-XXXX = 14 chars
+            let mut s = String::with_capacity(14);
+            s.push('(');
+            s.push_str(&number[0..3]);
+            s.push_str(") ");
+            s.push_str(&number[3..6]);
+            s.push('-');
+            s.push_str(&number[6..]);
+            s
+        }
         _ => {
-            if number.len() >= 7 {
-                let mid = number.len() / 2;
-                let mut s = String::with_capacity(number.len() + 1);
-                s.push_str(&number[0..mid]);
-                s.push(' ');
-                s.push_str(&number[mid..]);
-                s
-            } else {
-                number.to_string()
-            }
+            let group_sizes = national_format_group_sizes(country.code, number.len())
+                .or_else(|| default_national_group_sizes(number.len()));
+
+            group_sizes
+                .and_then(|groups| format_grouped_number(number, groups))
+                .unwrap_or_else(|| number.to_string())
         }
     }
+}
+
+fn national_format_group_sizes(country_code: &str, number_len: usize) -> Option<&'static [usize]> {
+    match (country_code, number_len) {
+        ("GB", 10) => Some(&[4, 3, 3]),
+        ("DE", 10) => Some(&[2, 4, 4]),
+        ("DE", 11) => Some(&[3, 4, 4]),
+        ("FR", 9) => Some(&[1, 2, 2, 2, 2]),
+        ("IN", 10) => Some(&[5, 5]),
+        ("AU", 9) => Some(&[1, 4, 4]),
+        _ => None,
+    }
+}
+
+fn default_national_group_sizes(number_len: usize) -> Option<&'static [usize]> {
+    match number_len {
+        7 => Some(&[3, 4]),
+        8 => Some(&[4, 4]),
+        9 => Some(&[3, 3, 3]),
+        10 => Some(&[3, 3, 4]),
+        11 => Some(&[3, 4, 4]),
+        12 => Some(&[3, 3, 3, 3]),
+        13 => Some(&[3, 3, 3, 4]),
+        14 => Some(&[3, 3, 4, 4]),
+        15 => Some(&[3, 4, 4, 4]),
+        _ => None,
+    }
+}
+
+fn format_grouped_number(number: &str, groups: &[usize]) -> Option<String> {
+    if groups.iter().sum::<usize>() != number.len() {
+        return None;
+    }
+
+    let mut formatted = String::with_capacity(number.len() + groups.len().saturating_sub(1));
+    let mut start = 0;
+
+    for (index, &group_len) in groups.iter().enumerate() {
+        if index > 0 {
+            formatted.push(' ');
+        }
+
+        let end = start + group_len;
+        formatted.push_str(&number[start..end]);
+        start = end;
+    }
+
+    Some(formatted)
 }
 
 /// Detect the type of a phone number (mobile, landline, toll-free, etc.)
@@ -463,16 +530,16 @@ fn classify_phone_number_type(national_number: &str, country: &Country) -> Phone
             }
         },
         "GB" => {
-            match n2 {
-                7 => PhoneNumberType::Mobile,
-                8 => match n3 {
+            match d0 {
+                b'7' => PhoneNumberType::Mobile,
+                b'8' => match n2 {
                     80 | 84 | 87 => PhoneNumberType::TollFree,
                     81 | 82 | 89 => PhoneNumberType::PremiumRate,
                     _ => PhoneNumberType::SharedCost,
                 },
-                1 | 2 => PhoneNumberType::FixedLine,
-                3 => PhoneNumberType::Uan,
-                5 => PhoneNumberType::Voip,
+                b'1' | b'2' => PhoneNumberType::FixedLine,
+                b'3' => PhoneNumberType::Uan,
+                b'5' => PhoneNumberType::Voip,
                 _ => PhoneNumberType::Unknown,
             }
         },
@@ -544,31 +611,13 @@ fn classify_phone_number_type(national_number: &str, country: &Country) -> Phone
 /// ```
 pub fn generate_random_phone_number(country_code: &str) -> Option<String> {
     let country = COUNTRIES.iter().find(|c| c.code == country_code)?;
-    
+
     // Use the first valid length for simplicity
     let length = *country.phone_lengths.first()? as usize;
-    
-    // Generate random digits
-    let mut national_number = String::with_capacity(length);
-    
-    // Use a simple pseudo-random generator based on system time
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
-    
-    // Generate digits for the national number
-    for _ in 0..length {
-        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-        let digit = (seed / 65536) % 10;
-        national_number.push_str(&digit.to_string());
-    }
-    
-    // Ensure first digit is not 0 for most countries
-    if national_number.starts_with('0') && country_code != "GB" {
-        national_number = format!("1{}", &national_number[1..]);
-    }
-    
+
+    let mut seed = random_seed();
+    let national_number = generate_random_national_number(length, country_code == "GB", &mut seed);
+
     // Format as E.164
     Some(format!("+{}{}", country.prefix, national_number))
 }
@@ -590,36 +639,23 @@ pub fn generate_random_phone_number(country_code: &str) -> Option<String> {
 /// // Returns a vector with 5 US phone numbers
 /// ```
 pub fn generate_random_phone_numbers(country_code: &str, count: usize) -> Vec<String> {
+    let country = match COUNTRIES.iter().find(|c| c.code == country_code) {
+        Some(country) => country,
+        None => return Vec::new(),
+    };
+    let length = match country.phone_lengths.first() {
+        Some(length) => *length as usize,
+        None => return Vec::new(),
+    };
+
     let mut numbers = Vec::with_capacity(count);
-    
-    for i in 0..count {
-        // Add some variation to the seed for each number
-        if let Some(number) = generate_random_phone_number(country_code) {
-            // Add slight variation based on index to ensure different numbers
-            let mut seed = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64)
-                .wrapping_add(i as u64 * 1000);
-            
-            // Modify last few digits to ensure uniqueness
-            let number_chars: Vec<char> = number.chars().collect();
-            let mut modified = String::with_capacity(number.len());
-            
-            for (idx, &ch) in number_chars.iter().enumerate() {
-                if idx >= number_chars.len() - 3 && ch.is_ascii_digit() {
-                    seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-                    let new_digit = (seed / 65536) % 10;
-                    modified.push_str(&new_digit.to_string());
-                } else {
-                    modified.push(ch);
-                }
-            }
-            
-            numbers.push(modified);
-        }
+    let mut seed = random_seed();
+
+    for _ in 0..count {
+        let national_number = generate_random_national_number(length, country_code == "GB", &mut seed);
+        numbers.push(format!("+{}{}", country.prefix, national_number));
     }
-    
+
     numbers
 }
 
@@ -802,17 +838,21 @@ pub fn analyze_phone_numbers_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Ph
         .iter()
         .map(|number| {
             let number_str = number.as_ref();
-            let is_valid = is_valid_phone_number(number_str);
-            let normalized = normalize_phone_number(number_str);
-            let country = extract_country(number_str);
-            let phone_type = detect_phone_number_type(number_str);
-            
-            PhoneNumberAnalysis {
-                original: number_str.to_string(),
-                is_valid,
-                normalized,
-                country,
-                phone_type,
+            match normalize_and_extract(number_str) {
+                Some((normalized, country, phone_type)) => PhoneNumberAnalysis {
+                    original: number_str.to_string(),
+                    is_valid: true,
+                    normalized: Some(normalized),
+                    country: Some(country),
+                    phone_type: Some(phone_type),
+                },
+                None => PhoneNumberAnalysis {
+                    original: number_str.to_string(),
+                    is_valid: false,
+                    normalized: None,
+                    country: None,
+                    phone_type: None,
+                },
             }
         })
         .collect()
@@ -848,18 +888,17 @@ pub fn suggest_phone_number_corrections(phone_number: &str, country_hint: Option
     if is_valid_phone_number(phone_number) {
         return vec![phone_number.to_string()]; // Already valid
     }
-    
+
     let mut suggestions = Vec::new();
     let mut cleaned = phone_number.to_string();
     remove_non_digit_character(&mut cleaned);
-    
+    let hinted_country = country_hint.and_then(|hint| COUNTRIES.iter().find(|c| c.code == hint));
+
     // Try adding country codes
-    if let Some(hint) = country_hint {
-        if let Some(country) = COUNTRIES.iter().find(|c| c.code == hint) {
-            let suggestion = format!("+{}{}", country.prefix, cleaned);
-            if is_valid_phone_number(&suggestion) {
-                suggestions.push(suggestion);
-            }
+    if let Some(country) = hinted_country {
+        let suggestion = format!("+{}{}", country.prefix, cleaned);
+        if is_valid_phone_number(&suggestion) {
+            suggestions.push(suggestion);
         }
     } else {
         // Try common country codes
@@ -873,38 +912,34 @@ pub fn suggest_phone_number_corrections(phone_number: &str, country_hint: Option
             }
         }
     }
-    
+
     // Try removing leading digits if number is too long
     if cleaned.len() > 15 {
         for i in 1..=(cleaned.len() - 7) {
             let shortened = cleaned[i..].to_string();
-            if let Some(hint) = country_hint {
-                if let Some(country) = COUNTRIES.iter().find(|c| c.code == hint) {
-                    let suggestion = format!("+{}{}", country.prefix, shortened);
-                    if is_valid_phone_number(&suggestion) {
-                        suggestions.push(suggestion);
-                        break;
-                    }
+            if let Some(country) = hinted_country {
+                let suggestion = format!("+{}{}", country.prefix, shortened);
+                if is_valid_phone_number(&suggestion) {
+                    suggestions.push(suggestion);
+                    break;
                 }
             }
         }
     }
-    
+
     // Try adding leading digits if number is too short
     if cleaned.len() < 10 {
         for prefix in &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"] {
             let extended = format!("{}{}", prefix, cleaned);
-            if let Some(hint) = country_hint {
-                if let Some(country) = COUNTRIES.iter().find(|c| c.code == hint) {
-                    let suggestion = format!("+{}{}", country.prefix, extended);
-                    if is_valid_phone_number(&suggestion) {
-                        suggestions.push(suggestion);
-                    }
+            if let Some(country) = hinted_country {
+                let suggestion = format!("+{}{}", country.prefix, extended);
+                if is_valid_phone_number(&suggestion) {
+                    suggestions.push(suggestion);
                 }
             }
         }
     }
-    
+
     // Remove duplicates and limit suggestions
     suggestions.sort();
     suggestions.dedup();
@@ -1002,17 +1037,19 @@ fn contains_invalid_character(phone_number: &str) -> bool {
     // check if the phone number contains invalid character
     // use as_bytes() for better performance when checking ASCII characters
 
-    for &byte in phone_number.as_bytes() {
+    for (index, &byte) in phone_number.as_bytes().iter().enumerate() {
         match byte {
-            b'0'..=b'9' | b'-' | b' ' => {}
+            b'0'..=b'9' | b'-' | b' ' | b'.' => {}
+            b'+' if index == 0 => {}
+            b'A'..=b'Z' | b'a'..=b'z' => {}
             b'(' => parentheses_count += 1,
-            b')' if parentheses_count == 0 => return false,
+            b')' if parentheses_count == 0 => return true,
             b')' => parentheses_count -= 1,
-            _ => return false,
+            _ => return true,
         }
     }
 
-    parentheses_count == 0
+    parentheses_count != 0
 }
 
 

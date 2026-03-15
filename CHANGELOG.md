@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-03-15
+
+### Fixed
+
+- Fixed `generate_random_phone_numbers()` reseeding logic so batch generation no longer produces repeated values when numbers are created in rapid succession
+- Fixed `contains_invalid_character()` so top-level validation accepts leading `+`, reports invalid characters correctly, and stays consistent with normalization
+- Fixed `suggest_phone_number_corrections()` repeated country hint lookups inside inner loops
+- Fixed `classify_phone_number_type()` for `GB` numbers by matching single-digit prefixes with `d0` and service ranges with `n2`
+- Fixed `analyze_phone_numbers_batch()` to derive validation, normalization, country, and type from a single parse pass per input
+
+### Changed
+
+- Extended national formatting with table-driven grouping for `GB`, `DE`, `FR`, `IN`, and `AU`, and replaced the generic split-in-half fallback with length-based grouping
+- Wired extension stripping and vanity-letter conversion into the shared normalization path and aligned `extract_country()` with that preprocessing
+- Aligned `normalize_phone_number_in_place()` with shared preprocessing for vanity numbers and extension suffixes
+
 ## [1.1.0] - 2026-03-09
 
 ### Performance

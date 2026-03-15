@@ -1,6 +1,6 @@
 [package]
 name = "phonelib"
-version = "1.1.2"
+version = "1.1.3"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
@@ -31,6 +31,14 @@ criterion = "0.8.2"
 
 [[bench]]
 name = "phone_benchmark"
+harness = false
+
+[[bench]]
+name = "parsing_benchmark"
+harness = false
+
+[[bench]]
+name = "formatting_benchmark"
 harness = false
 
 [profile.release]

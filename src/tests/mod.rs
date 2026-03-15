@@ -871,10 +871,16 @@ mod tests {
     fn test_is_valid_phone_number() {
         // Valid phone number
         assert!(is_valid_phone_number("+96179123123"));
+        assert!(is_valid_phone_number("12025550173"));
+        assert!(is_valid_phone_number("+1.202.555.0173"));
+        assert!(is_valid_phone_number("+1 (202) 555-0173 ext. 99"));
+        assert!(is_valid_phone_number("1-800-FLOWERS"));
         assert!(!is_valid_phone_number("invalid_phone_number"));
         // Valid phone number with parentheses
         assert!(is_valid_phone_number("+1 (234) 567-8990"));
         assert!(!is_valid_phone_number("+1 (234) 567-890"));
+        assert!(!is_valid_phone_number("1+2025550173"));
+        assert!(!is_valid_phone_number("+1 (234 567-8990"));
     }
 
     #[test]
@@ -908,6 +914,14 @@ mod tests {
             normalize_phone_number_in_place(&mut "+1 (234) 567-8910".to_string()),
             Some("+12345678910".to_string())
         );
+        assert_eq!(
+            normalize_phone_number_in_place(&mut "+1 (202) 555-0173 ext. 99".to_string()),
+            Some("+12025550173".to_string())
+        );
+        assert_eq!(
+            normalize_phone_number_in_place(&mut "1-800-FLOWERS".to_string()),
+            Some("+18003569377".to_string())
+        );
     }
 
     #[test]
@@ -922,6 +936,7 @@ mod tests {
         );
         // Invalid country code
         assert_eq!(extract_country("+987654321"), None);
+        assert_eq!(extract_country("1-800-FLOWERS").map(|country| country.code), Some("US"));
     }
 
     #[test]
@@ -940,6 +955,14 @@ mod tests {
         assert_eq!(
             normalize_phone_number("invalid_phone_number"),
             None
+        );
+        assert_eq!(
+            normalize_phone_number("+1 (202) 555-0173 ext. 99"),
+            Some("+12025550173".to_string())
+        );
+        assert_eq!(
+            normalize_phone_number("1-800-FLOWERS"),
+            Some("+18003569377".to_string())
         );
     }
 
@@ -983,6 +1006,26 @@ mod tests {
         // Test RFC3966 format
         let rfc = format_phone_number(number, PhoneFormat::RFC3966);
         assert!(rfc.is_some());
+    }
+
+    #[test]
+    fn test_phone_number_formatting_major_country_national_patterns() {
+        assert_eq!(
+            format_phone_number("+493012345678", PhoneFormat::National),
+            Some("30 1234 5678".to_string())
+        );
+        assert_eq!(
+            format_phone_number("+33123456789", PhoneFormat::National),
+            Some("1 23 45 67 89".to_string())
+        );
+        assert_eq!(
+            format_phone_number("+919876543210", PhoneFormat::National),
+            Some("98765 43210".to_string())
+        );
+        assert_eq!(
+            format_phone_number("+61412345678", PhoneFormat::National),
+            Some("4 1234 5678".to_string())
+        );
     }
 
     #[test]
@@ -1864,6 +1907,15 @@ mod tests {
     fn test_generate_random_phone_numbers_basic() {
         let numbers = generate_random_phone_numbers("US", 5);
         assert_eq!(numbers.len(), 5);
+    }
+
+    #[test]
+    fn test_generate_random_phone_numbers_do_not_repeat_same_value() {
+        let numbers = generate_random_phone_numbers("US", 8);
+        let unique_numbers: std::collections::HashSet<_> = numbers.iter().collect();
+
+        assert_eq!(numbers.len(), 8);
+        assert!(unique_numbers.len() > 1);
     }
 
     #[test]

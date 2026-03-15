@@ -40,7 +40,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phonelib = "1.1.2"
+phonelib = "1.1.3"
 ```
 
 ## Quick Start
