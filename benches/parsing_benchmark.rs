@@ -1,4 +1,4 @@
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use phonelib::PhoneNumber;
 use std::hint::black_box;
 
@@ -134,11 +134,8 @@ fn parsing_benchmark(c: &mut Criterion) {
         b.iter_batched(
             || iter.next().unwrap(),
             |(number_str, region)| {
-                let _ = PhoneNumber::parse_with_country(
-                    black_box(number_str),
-                    black_box(region),
-                )
-                .unwrap();
+                let _ = PhoneNumber::parse_with_country(black_box(number_str), black_box(region))
+                    .unwrap();
             },
             BatchSize::SmallInput,
         )

@@ -40,7 +40,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phonelib = "1.1.3"
+phonelib = "1.2.0"
 ```
 
 ## Quick Start
@@ -498,7 +498,21 @@ cargo clippy
 
 ## Changelog
 
-### v1.1.0 (Latest)
+### v1.2.0 (Latest)
+
+**Correctness & Coverage Release**
+
+- Country detection now works for the 22 NANP territories with 4-digit dialing prefixes (e.g. Antigua `1268`, Jamaica `1876`) instead of misreporting them as `US`
+- Added Puerto Rico (`787`/`939`) and the Dominican Republic overlay codes (`829`/`849`)
+- `normalize_phone_number()` no longer emits invalid/non-idempotent results when stripping a trunk-prefix zero
+- Random number generation always produces valid, round-trippable numbers (fixed a ~10% invalid rate for `GB`)
+- `RFC3966` formatting no longer leaves an orphaned trailing digit
+- `strip_extension()` only treats `ext`/`ext.` as a marker at a word boundary
+- Hardened random seeding against a pre-epoch system clock
+
+See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### v1.1.0
 
 **Performance & Data Quality Release**
 

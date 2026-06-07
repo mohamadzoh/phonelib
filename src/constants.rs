@@ -2,7 +2,7 @@ use crate::definitions;
 
 use definitions::Country;
 
-pub const COUNTRIES: [Country; 248] = [
+pub const COUNTRIES: [Country; 252] = [
     Country {
         name: "Andorra",
         code: "AD",
@@ -30,13 +30,13 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Antigua and Barbuda",
         code: "AG",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1268,
     },
     Country {
         name: "Anguilla",
         code: "AI",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1264,
     },
     Country {
@@ -72,7 +72,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "American Samoa",
         code: "AS",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1684,
     },
     Country {
@@ -114,7 +114,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Barbados",
         code: "BB",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1246,
     },
     Country {
@@ -180,7 +180,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Bermuda",
         code: "BM",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1441,
     },
     Country {
@@ -204,7 +204,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Bahamas",
         code: "BS",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1242,
     },
     Country {
@@ -372,14 +372,26 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Dominica",
         code: "DM",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1767,
     },
     Country {
         name: "Dominican Republic",
         code: "DO",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1809,
+    },
+    Country {
+        name: "Dominican Republic",
+        code: "DO",
+        phone_lengths: &[7],
+        prefix: 1829,
+    },
+    Country {
+        name: "Dominican Republic",
+        code: "DO",
+        phone_lengths: &[7],
+        prefix: 1849,
     },
     Country {
         name: "Algeria",
@@ -480,7 +492,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Grenada",
         code: "GD",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1473,
     },
     Country {
@@ -564,7 +576,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Guam",
         code: "GU",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1671,
     },
     Country {
@@ -678,7 +690,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Jamaica",
         code: "JM",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1876,
     },
     Country {
@@ -726,7 +738,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Saint Kitts and Nevis",
         code: "KN",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1869,
     },
     Country {
@@ -918,7 +930,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Montserrat",
         code: "MS",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1664,
     },
     Country {
@@ -1096,6 +1108,18 @@ pub const COUNTRIES: [Country; 248] = [
         prefix: 870,
     },
     Country {
+        name: "Puerto Rico",
+        code: "PR",
+        phone_lengths: &[7],
+        prefix: 1787,
+    },
+    Country {
+        name: "Puerto Rico",
+        code: "PR",
+        phone_lengths: &[7],
+        prefix: 1939,
+    },
+    Country {
         name: "Portugal",
         code: "PT",
         phone_lengths: &[9],
@@ -1260,7 +1284,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Sint Maarten (Dutch part)",
         code: "SX",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1721,
     },
     Country {
@@ -1278,7 +1302,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Turks and Caicos Islands",
         code: "TC",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1649,
     },
     Country {
@@ -1350,7 +1374,7 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Trinidad and Tobago",
         code: "TT",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1868,
     },
     Country {
@@ -1428,13 +1452,13 @@ pub const COUNTRIES: [Country; 248] = [
     Country {
         name: "Virgin Islands, British",
         code: "VG",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1284,
     },
     Country {
         name: "Virgin Islands, U.S.",
         code: "VI",
-        phone_lengths: &[10],
+        phone_lengths: &[7],
         prefix: 1340,
     },
     Country {

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-07
+
+### Added
+
+- Added the missing NANP overlay area codes so multi-code regions resolve from any of their area codes: Dominican Republic `829` and `849` (in addition to `809`), and Puerto Rico (`787` and `939`), which was previously absent from the dataset
+
+### Fixed
+
+- Fixed `normalize_phone_number()` (and `normalize_phone_number_in_place()`) emitting strings the library itself rejected: stripping a national trunk-prefix zero could shorten a number below a valid length. Normalization now re-validates the national length after stripping and returns `None` instead of a non-idempotent/invalid result
+- Fixed `generate_random_phone_number()`/`generate_random_phone_numbers()` producing invalid numbers: removed the bogus `GB` leading-zero special case (which made ~10% of `GB` numbers invalid) so national numbers always start with a non-zero digit, and the generator now re-validates each candidate and retries, guarding against rare collisions (e.g. a `US` national beginning with a Caribbean area code plus a trunk zero)
+- Fixed `RFC3966` formatting leaving an orphaned trailing digit (e.g. `tel:+1-202-555-017-3`); it now groups the national number using the same group-size tables as the national/international formats, joined with `-` (e.g. `tel:+1-202-555-0173`)
+- Removed dead code in `guess_country_from_number()` (a no-op `continue` branch)
+- Fixed country detection for the 22 NANP territories that use a 4-digit dialing prefix (country code 1 plus a 3-digit area code, e.g. `1268` Antigua, `1876` Jamaica). `extract_country()` now resolves these to their own country instead of collapsing them into `US`, and `prefix_digit_count()`/`push_prefix_digits()` handle 4-digit prefixes. Corrected the affected `phone_lengths` entries to the 7 significant digits that follow the prefix
+- Fixed `strip_extension()` to only treat `ext`/`ext.` as an extension marker at a word boundary, so words such as "next" or "text" are no longer mistaken for an extension
+- Fixed a potential panic in random seed generation when the system clock is set before the Unix epoch
+
+### Performance
+
+- Kept country lookup on the original fast path: codes outside the NANP are prefix-free and resolve shortest-prefix-first in one or two probes, so they match 1.1.3 speed. `+1` numbers add only a few-nanosecond compile-time bitmap test to rule out the common US/Canada case before considering the new 4-digit territory prefixes
+- `generate_random_phone_number()` only validates/retries for the bare NANP code (US/CA); every other country is built directly
+
+### Changed
+
+- Documented that the phone-number generator uses a non-cryptographic PRNG suitable only for sample/test data
+- Resolved all Clippy lints across the crate, tests, and benches; `cargo clippy --all-targets -- -D warnings` now passes clean
+
 ## [1.1.3] - 2026-03-15
 
 ### Fixed

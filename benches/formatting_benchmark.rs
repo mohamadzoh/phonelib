@@ -1,4 +1,4 @@
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use phonelib::{PhoneFormat, PhoneNumber};
 use std::hint::black_box;
 

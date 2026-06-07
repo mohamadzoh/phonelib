@@ -38,8 +38,8 @@
 //! ```
 
 use std::sync::{
-    OnceLock,
     atomic::{AtomicU64, Ordering},
+    OnceLock,
 };
 
 use constants::COUNTRIES;
@@ -59,11 +59,11 @@ struct CountryEntry {
 fn prefix_table() -> &'static [Vec<CountryEntry>] {
     static TABLE: OnceLock<Vec<Vec<CountryEntry>>> = OnceLock::new();
     TABLE.get_or_init(|| {
-        let mut table: Vec<Vec<CountryEntry>> = (0..1000).map(|_| Vec::new()).collect();
+        // Size the table to cover every prefix, including the 4-digit NANP
+        // prefixes (country code 1 + 3-digit area code, e.g. 1268 = Antigua).
+        let max_prefix = COUNTRIES.iter().map(|c| c.prefix).max().unwrap_or(0) as usize;
+        let mut table: Vec<Vec<CountryEntry>> = (0..=max_prefix).map(|_| Vec::new()).collect();
         for country in COUNTRIES.iter() {
-            // Only index prefixes up to 3 digits; extract_country_data
-            // only tries 1/2/3-digit prefix lookups.
-            if country.prefix >= 1000 { continue; }
             let mut mask = 0u32;
             for &len in country.phone_lengths {
                 mask |= 1u32 << (len as u32);
@@ -77,29 +77,56 @@ fn prefix_table() -> &'static [Vec<CountryEntry>] {
     })
 }
 
+/// Bitmap of which 4-digit NANP prefixes (1000..=1999) are populated territory
+/// codes (e.g. 1268 = Antigua). Lets the hot `+1` path rule out the common
+/// US/Canada case with a single cache-friendly bit test instead of probing the
+/// large prefix table. Bit `n` corresponds to prefix `1000 + n`.
+///
+/// Computed at compile time from `COUNTRIES`, so there is no runtime init cost.
+const NANP_TERRITORY_BITMAP: [u64; 16] = {
+    let mut bitmap = [0u64; 16];
+    let mut i = 0;
+    while i < COUNTRIES.len() {
+        let prefix = COUNTRIES[i].prefix;
+        if prefix >= 1000 && prefix < 2000 {
+            let idx = (prefix - 1000) as usize;
+            bitmap[idx >> 6] |= 1u64 << (idx & 63);
+        }
+        i += 1;
+    }
+    bitmap
+};
+
 fn random_seed() -> u64 {
     static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    // Falls back to 0 if the system clock is set before the Unix epoch; the
+    // monotonic counter below still guarantees a distinct seed per call.
     let time_seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
+        .map_or(0, |d| d.as_nanos() as u64);
     let counter = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     time_seed ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
+/// Simple linear congruential generator. Suitable only for producing
+/// sample/test phone numbers — NOT cryptographically secure and not a
+/// high-quality source of randomness.
 fn next_random_digit(seed: &mut u64) -> u8 {
     *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
     ((*seed / 65536) % 10) as u8
 }
 
-fn generate_random_national_number(length: usize, allow_leading_zero: bool, seed: &mut u64) -> String {
+fn generate_random_national_number(length: usize, seed: &mut u64) -> String {
     let mut national_number = String::with_capacity(length);
 
     for index in 0..length {
         let mut digit = next_random_digit(seed);
-        if index == 0 && digit == 0 && !allow_leading_zero {
+        // Force a non-zero leading digit. A leading zero is a trunk prefix, not
+        // part of the E.164 significant number, so it would be stripped on
+        // normalization and shorten the number below its valid length.
+        if index == 0 && digit == 0 {
             digit = 1;
         }
 
@@ -107,6 +134,44 @@ fn generate_random_national_number(length: usize, allow_leading_zero: bool, seed
     }
 
     national_number
+}
+
+/// Assemble an E.164 string from a country prefix and national number.
+#[inline]
+fn build_e164(country: &Country, national: &str, prefix_len: usize) -> String {
+    let mut s = String::with_capacity(prefix_len + 1 + national.len());
+    s.push('+');
+    push_prefix_digits(&mut s, country.prefix);
+    s.push_str(national);
+    s
+}
+
+/// Build a random valid E.164 number for `country`.
+///
+/// For every country except the bare NANP code (US/CA, prefix 1) a non-zero
+/// leading national of a valid length is always valid, so it is built directly.
+/// Only prefix 1 can collide with a 4-digit NANP territory prefix (a national
+/// beginning with a Caribbean area code followed by a trunk zero), so there the
+/// candidate is validated and regenerated on the rare miss.
+fn generate_valid_number(country: &Country, length: usize, seed: &mut u64) -> String {
+    let prefix_len = prefix_digit_count(country.prefix);
+
+    if country.prefix != 1 {
+        let national = generate_random_national_number(length, seed);
+        return build_e164(country, &national, prefix_len);
+    }
+
+    let mut candidate = String::new();
+    for _ in 0..64 {
+        let national = generate_random_national_number(length, seed);
+        candidate = build_e164(country, &national, prefix_len);
+        if normalize_phone_number(&candidate).as_deref() == Some(candidate.as_str()) {
+            return candidate;
+        }
+    }
+
+    // Unreachable for real country data; return the last attempt as a fallback.
+    candidate
 }
 
 /// Validates whether a phone number is valid.
@@ -224,7 +289,14 @@ pub fn normalize_phone_number_in_place(phone_number: &mut String) -> Option<Stri
     phone_number.drain(0..plen);
 
     // Remove all leading zeros if present
+    let had_leading_zero = phone_number.as_bytes().first() == Some(&b'0');
     leading_zero_remover(phone_number);
+
+    // Re-validate the national length only if a trunk-prefix zero was stripped;
+    // see normalize_and_extract for why this guards normalization idempotency.
+    if had_leading_zero && !country.phone_lengths.contains(&(phone_number.len() as u8)) {
+        return None;
+    }
 
     // Build E.164 string without intermediate allocations
     let mut normalized = String::with_capacity(phone_number.len() + plen + 1);
@@ -252,10 +324,16 @@ fn normalize_and_extract(input: &str) -> Option<(String, &'static Country, Phone
     let mut digit_count = 0;
     let input_bytes = processed_input.as_bytes();
     // Skip leading '+' if present
-    let scan_start = if input_bytes.first() == Some(&b'+') { 1 } else { 0 };
+    let scan_start = if input_bytes.first() == Some(&b'+') {
+        1
+    } else {
+        0
+    };
     for &b in &input_bytes[scan_start..] {
         if b.is_ascii_digit() {
-            if digit_count >= 20 { return None; }
+            if digit_count >= 20 {
+                return None;
+            }
             digits[digit_count] = b;
             digit_count += 1;
         }
@@ -266,7 +344,9 @@ fn normalize_and_extract(input: &str) -> Option<(String, &'static Country, Phone
     while start < digit_count && digits[start] == b'0' {
         start += 1;
     }
-    if start >= digit_count { return None; }
+    if start >= digit_count {
+        return None;
+    }
 
     // SAFETY: buffer contains only ASCII digit bytes (0x30..=0x39), which are valid UTF-8
     let cleaned = unsafe { std::str::from_utf8_unchecked(&digits[start..digit_count]) };
@@ -284,6 +364,14 @@ fn normalize_and_extract(input: &str) -> Option<(String, &'static Country, Phone
 
     // SAFETY: sub-slice of ASCII digit buffer
     let national = unsafe { std::str::from_utf8_unchecked(&national_bytes[nat_start..]) };
+
+    // The country was matched on the pre-strip length. If we stripped a national
+    // trunk-prefix zero, re-validate the shortened length; otherwise it is still
+    // the already-validated length. This keeps normalization idempotent without
+    // paying for a re-check on the common (no-leading-zero) path.
+    if nat_start > 0 && !country.phone_lengths.contains(&(national.len() as u8)) {
+        return None;
+    }
 
     // Classify type from national number
     let phone_type = classify_phone_number_type(national, country);
@@ -311,19 +399,19 @@ pub enum PhoneFormat {
 }
 
 /// Format a phone number according to the specified format
-/// 
+///
 /// # Arguments
 /// * `phone_number` - The phone number to format
 /// * `format` - The desired format
-/// 
+///
 /// # Returns
 /// * `Some(String)` - The formatted phone number if valid
 /// * `None` - If the phone number is invalid
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::{format_phone_number, PhoneFormat};
-/// 
+///
 /// let formatted = format_phone_number("12345678901", PhoneFormat::E164);
 /// // Returns Some("+12345678901") if valid
 /// ```
@@ -345,23 +433,17 @@ pub fn format_phone_number(phone_number: &str, format: PhoneFormat) -> Option<St
                     result.push(' ');
                     result.push_str(&formatted);
                     Some(result)
-                },
-                PhoneFormat::National => {
-                    Some(format_national_number(national_number, country))
-                },
+                }
+                PhoneFormat::National => Some(format_national_number(national_number, country)),
                 PhoneFormat::RFC3966 => {
-                    let mut result = String::with_capacity(5 + normalized.len() + 4);
+                    let national = format_national_number_rfc3966(national_number, country);
+                    let mut result = String::with_capacity(6 + plen + national.len());
                     result.push_str("tel:+");
                     push_prefix_digits(&mut result, country.prefix);
                     result.push('-');
-                    for (i, b) in national_number.bytes().enumerate() {
-                        if i > 0 && i % 3 == 0 {
-                            result.push('-');
-                        }
-                        result.push(b as char);
-                    }
+                    result.push_str(&national);
                     Some(result)
-                },
+                }
                 _ => unreachable!(),
             }
         }
@@ -386,7 +468,7 @@ fn format_national_number(number: &str, country: &Country) -> String {
                 .or_else(|| default_national_group_sizes(number.len()));
 
             group_sizes
-                .and_then(|groups| format_grouped_number(number, groups))
+                .and_then(|groups| format_grouped_number(number, groups, ' '))
                 .unwrap_or_else(|| number.to_string())
         }
     }
@@ -419,7 +501,7 @@ fn default_national_group_sizes(number_len: usize) -> Option<&'static [usize]> {
     }
 }
 
-fn format_grouped_number(number: &str, groups: &[usize]) -> Option<String> {
+fn format_grouped_number(number: &str, groups: &[usize], separator: char) -> Option<String> {
     if groups.iter().sum::<usize>() != number.len() {
         return None;
     }
@@ -429,7 +511,7 @@ fn format_grouped_number(number: &str, groups: &[usize]) -> Option<String> {
 
     for (index, &group_len) in groups.iter().enumerate() {
         if index > 0 {
-            formatted.push(' ');
+            formatted.push(separator);
         }
 
         let end = start + group_len;
@@ -440,19 +522,29 @@ fn format_grouped_number(number: &str, groups: &[usize]) -> Option<String> {
     Some(formatted)
 }
 
+/// Group a national number for RFC3966 `tel:` URIs, joining groups with '-'.
+/// Uses the same group-size tables as the national/international formats so the
+/// final group is never an orphaned single digit.
+fn format_national_number_rfc3966(number: &str, country: &Country) -> String {
+    national_format_group_sizes(country.code, number.len())
+        .or_else(|| default_national_group_sizes(number.len()))
+        .and_then(|groups| format_grouped_number(number, groups, '-'))
+        .unwrap_or_else(|| number.to_string())
+}
+
 /// Detect the type of a phone number (mobile, landline, toll-free, etc.)
-/// 
+///
 /// # Arguments
 /// * `phone_number` - The phone number to analyze
-/// 
+///
 /// # Returns
 /// * `Some(PhoneNumberType)` - The detected phone number type if valid
 /// * `None` - If the phone number is invalid
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::{detect_phone_number_type, PhoneNumberType};
-/// 
+///
 /// let number_type = detect_phone_number_type("12345678901");
 /// // Returns Some(PhoneNumberType) if valid
 /// ```
@@ -461,10 +553,10 @@ pub fn detect_phone_number_type(phone_number: &str) -> Option<PhoneNumberType> {
 }
 
 /// Check if a phone number is a mobile number
-/// 
+///
 /// # Arguments
 /// * `phone_number` - The phone number to check
-/// 
+///
 /// # Returns
 /// * `true` - If the number is a mobile number
 /// * `false` - If the number is not mobile or invalid
@@ -473,10 +565,10 @@ pub fn is_mobile_number(phone_number: &str) -> bool {
 }
 
 /// Check if a phone number is a landline number
-/// 
+///
 /// # Arguments
 /// * `phone_number` - The phone number to check
-/// 
+///
 /// # Returns
 /// * `true` - If the number is a landline number
 /// * `false` - If the number is not landline or invalid
@@ -485,10 +577,10 @@ pub fn is_landline_number(phone_number: &str) -> bool {
 }
 
 /// Check if a phone number is a toll-free number
-/// 
+///
 /// # Arguments
 /// * `phone_number` - The phone number to check
-/// 
+///
 /// # Returns
 /// * `true` - If the number is toll-free
 /// * `false` - If the number is not toll-free or invalid
@@ -516,96 +608,86 @@ fn classify_phone_number_type(national_number: &str, country: &Country) -> Phone
     };
 
     match country.code {
-        "US" | "CA" => {
-            match n3 {
-                800 | 833 | 844 | 855 | 866 | 877 | 888 => PhoneNumberType::TollFree,
-                900 | 976 => PhoneNumberType::PremiumRate,
-                _ => {
-                    if bytes.len() == 10 {
-                        PhoneNumberType::FixedLine
-                    } else {
-                        PhoneNumberType::Unknown
-                    }
+        "US" | "CA" => match n3 {
+            800 | 833 | 844 | 855 | 866 | 877 | 888 => PhoneNumberType::TollFree,
+            900 | 976 => PhoneNumberType::PremiumRate,
+            _ => {
+                if bytes.len() == 10 {
+                    PhoneNumberType::FixedLine
+                } else {
+                    PhoneNumberType::Unknown
                 }
             }
         },
-        "GB" => {
-            match d0 {
-                b'7' => PhoneNumberType::Mobile,
-                b'8' => match n2 {
-                    80 | 84 | 87 => PhoneNumberType::TollFree,
-                    81 | 82 | 89 => PhoneNumberType::PremiumRate,
-                    _ => PhoneNumberType::SharedCost,
-                },
-                b'1' | b'2' => PhoneNumberType::FixedLine,
-                b'3' => PhoneNumberType::Uan,
-                b'5' => PhoneNumberType::Voip,
-                _ => PhoneNumberType::Unknown,
-            }
+        "GB" => match d0 {
+            b'7' => PhoneNumberType::Mobile,
+            b'8' => match n2 {
+                80 | 84 | 87 => PhoneNumberType::TollFree,
+                81 | 82 | 89 => PhoneNumberType::PremiumRate,
+                _ => PhoneNumberType::SharedCost,
+            },
+            b'1' | b'2' => PhoneNumberType::FixedLine,
+            b'3' => PhoneNumberType::Uan,
+            b'5' => PhoneNumberType::Voip,
+            _ => PhoneNumberType::Unknown,
         },
-        "DE" => {
-            match d0 {
-                b'1' => match n2 {
-                    15 | 16 | 17 => PhoneNumberType::Mobile,
-                    18 => PhoneNumberType::SharedCost,
-                    19 => PhoneNumberType::PremiumRate,
-                    _ => PhoneNumberType::Unknown,
-                },
-                b'0' => PhoneNumberType::TollFree,
-                _ => PhoneNumberType::FixedLine,
-            }
-        },
-        "FR" => {
-            match d0 {
-                b'6' | b'7' => PhoneNumberType::Mobile,
-                b'8' => PhoneNumberType::TollFree,
-                b'1' | b'2' | b'3' | b'4' | b'5' | b'9' => PhoneNumberType::FixedLine,
+        "DE" => match d0 {
+            b'1' => match n2 {
+                15..=17 => PhoneNumberType::Mobile,
+                18 => PhoneNumberType::SharedCost,
+                19 => PhoneNumberType::PremiumRate,
                 _ => PhoneNumberType::Unknown,
-            }
+            },
+            b'0' => PhoneNumberType::TollFree,
+            _ => PhoneNumberType::FixedLine,
         },
-        "AU" => {
-            match d0 {
-                b'4' => PhoneNumberType::Mobile,
-                b'1' => match n3 {
-                    180 | 188 => PhoneNumberType::TollFree,
-                    190 => PhoneNumberType::PremiumRate,
-                    _ => PhoneNumberType::Unknown,
-                },
-                b'2' | b'3' | b'7' | b'8' => PhoneNumberType::FixedLine,
-                _ => PhoneNumberType::Unknown,
-            }
+        "FR" => match d0 {
+            b'6' | b'7' => PhoneNumberType::Mobile,
+            b'8' => PhoneNumberType::TollFree,
+            b'1' | b'2' | b'3' | b'4' | b'5' | b'9' => PhoneNumberType::FixedLine,
+            _ => PhoneNumberType::Unknown,
         },
-        "IN" => {
-            match d0 {
-                b'9' | b'8' | b'7' | b'6' => PhoneNumberType::Mobile,
-                b'1' | b'2' | b'3' | b'4' | b'5' => PhoneNumberType::FixedLine,
+        "AU" => match d0 {
+            b'4' => PhoneNumberType::Mobile,
+            b'1' => match n3 {
+                180 | 188 => PhoneNumberType::TollFree,
+                190 => PhoneNumberType::PremiumRate,
                 _ => PhoneNumberType::Unknown,
-            }
+            },
+            b'2' | b'3' | b'7' | b'8' => PhoneNumberType::FixedLine,
+            _ => PhoneNumberType::Unknown,
         },
-        _ => {
-            match d0 {
-                b'9' | b'8' | b'7' | b'6' => PhoneNumberType::Mobile,
-                b'1' | b'2' | b'3' | b'4' | b'5' => PhoneNumberType::FixedLine,
-                b'0' => PhoneNumberType::TollFree,
-                _ => PhoneNumberType::Unknown,
-            }
-        }
+        "IN" => match d0 {
+            b'9' | b'8' | b'7' | b'6' => PhoneNumberType::Mobile,
+            b'1' | b'2' | b'3' | b'4' | b'5' => PhoneNumberType::FixedLine,
+            _ => PhoneNumberType::Unknown,
+        },
+        _ => match d0 {
+            b'9' | b'8' | b'7' | b'6' => PhoneNumberType::Mobile,
+            b'1' | b'2' | b'3' | b'4' | b'5' => PhoneNumberType::FixedLine,
+            b'0' => PhoneNumberType::TollFree,
+            _ => PhoneNumberType::Unknown,
+        },
     }
 }
 
 /// Generate a random valid phone number for a specific country
-/// 
+///
 /// # Arguments
 /// * `country_code` - The ISO 3166-1 alpha-2 country code (e.g., "US", "GB", "DE")
-/// 
+///
 /// # Returns
 /// * `Some(String)` - A random valid phone number for the country
 /// * `None` - If the country code is not found
-/// 
+///
+/// # Note
+/// The generated digits come from a simple PRNG intended for sample/test data.
+/// It is not cryptographically secure and must not be used to generate secrets.
+///
 /// # Examples
 /// ```
 /// use phonelib::generate_random_phone_number;
-/// 
+///
 /// let random_us_number = generate_random_phone_number("US");
 /// // Returns Some("+1234567890") or similar
 /// ```
@@ -616,25 +698,23 @@ pub fn generate_random_phone_number(country_code: &str) -> Option<String> {
     let length = *country.phone_lengths.first()? as usize;
 
     let mut seed = random_seed();
-    let national_number = generate_random_national_number(length, country_code == "GB", &mut seed);
 
-    // Format as E.164
-    Some(format!("+{}{}", country.prefix, national_number))
+    Some(generate_valid_number(country, length, &mut seed))
 }
 
 /// Generate multiple random valid phone numbers for a specific country
-/// 
+///
 /// # Arguments
 /// * `country_code` - The ISO 3166-1 alpha-2 country code
 /// * `count` - Number of phone numbers to generate
-/// 
+///
 /// # Returns
 /// * `Vec<String>` - A vector of random valid phone numbers
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::generate_random_phone_numbers;
-/// 
+///
 /// let numbers = generate_random_phone_numbers("US", 5);
 /// // Returns a vector with 5 US phone numbers
 /// ```
@@ -652,60 +732,62 @@ pub fn generate_random_phone_numbers(country_code: &str, count: usize) -> Vec<St
     let mut seed = random_seed();
 
     for _ in 0..count {
-        let national_number = generate_random_national_number(length, country_code == "GB", &mut seed);
-        numbers.push(format!("+{}{}", country.prefix, national_number));
+        numbers.push(generate_valid_number(country, length, &mut seed));
     }
 
     numbers
 }
 
 /// Check if two phone numbers are equivalent (same number, different formats)
-/// 
+///
 /// # Arguments
 /// * `number1` - First phone number
 /// * `number2` - Second phone number
-/// 
+///
 /// # Returns
 /// * `true` - If the numbers represent the same phone number
 /// * `false` - If the numbers are different or invalid
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::are_phone_numbers_equal;
-/// 
+///
 /// let equal = are_phone_numbers_equal("+1234567890", "(234) 567-890");
 /// // Returns true if both represent the same number
 /// ```
 pub fn are_phone_numbers_equal(number1: &str, number2: &str) -> bool {
-    match (normalize_phone_number(number1), normalize_phone_number(number2)) {
+    match (
+        normalize_phone_number(number1),
+        normalize_phone_number(number2),
+    ) {
         (Some(norm1), Some(norm2)) => norm1 == norm2,
         _ => false,
     }
 }
 
 /// Compare multiple phone numbers and group them by equivalence
-/// 
+///
 /// # Arguments
 /// * `phone_numbers` - Slice of phone numbers to compare
-/// 
+///
 /// # Returns
 /// * `Vec<Vec<String>>` - Groups of equivalent phone numbers
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::group_equivalent_phone_numbers;
-/// 
+///
 /// let numbers = ["+1234567890", "(234) 567-890", "+9876543210"];
 /// let groups = group_equivalent_phone_numbers(&numbers);
 /// // Returns groups of equivalent numbers
 /// ```
 pub fn group_equivalent_phone_numbers<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Vec<String>> {
     let mut groups: Vec<Vec<String>> = Vec::new();
-    
+
     for number in phone_numbers {
         let number_str = number.as_ref();
         let mut found_group = false;
-        
+
         // Try to find an existing group for this number
         for group in &mut groups {
             if let Some(representative) = group.first() {
@@ -716,28 +798,28 @@ pub fn group_equivalent_phone_numbers<T: AsRef<str>>(phone_numbers: &[T]) -> Vec
                 }
             }
         }
-        
+
         // If no group found, create a new one
         if !found_group {
             groups.push(vec![number_str.to_string()]);
         }
     }
-    
+
     groups
 }
 
 /// Validate multiple phone numbers at once
-/// 
+///
 /// # Arguments
 /// * `phone_numbers` - Slice of phone numbers to validate
-/// 
+///
 /// # Returns
 /// * `Vec<bool>` - Vector of validation results in the same order
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::validate_phone_numbers_batch;
-/// 
+///
 /// let numbers = ["1234567890", "invalid"];
 /// let results = validate_phone_numbers_batch(&numbers);
 /// // Returns [true, false]
@@ -750,17 +832,17 @@ pub fn validate_phone_numbers_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<b
 }
 
 /// Normalize multiple phone numbers at once
-/// 
+///
 /// # Arguments
 /// * `phone_numbers` - Slice of phone numbers to normalize
-/// 
+///
 /// # Returns
 /// * `Vec<Option<String>>` - Vector of normalized numbers (None for invalid ones)
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::normalize_phone_numbers_batch;
-/// 
+///
 /// let numbers = ["1234567890", "(234) 567-890"];
 /// let normalized = normalize_phone_numbers_batch(&numbers);
 /// // Returns [Some("+1234567890"), Some("+1234567890")]
@@ -773,22 +855,24 @@ pub fn normalize_phone_numbers_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<
 }
 
 /// Extract countries for multiple phone numbers at once
-/// 
+///
 /// # Arguments
 /// * `phone_numbers` - Slice of phone numbers to analyze
-/// 
+///
 /// # Returns
 /// * `Vec<Option<&'static Country>>` - Vector of country data (None for invalid ones)
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::extract_countries_batch;
-/// 
+///
 /// let numbers = ["1234567890", "44123456789"];
 /// let countries = extract_countries_batch(&numbers);
 /// // Returns country data for each number
 /// ```
-pub fn extract_countries_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Option<&'static Country>> {
+pub fn extract_countries_batch<T: AsRef<str>>(
+    phone_numbers: &[T],
+) -> Vec<Option<&'static Country>> {
     phone_numbers
         .iter()
         .map(|n| extract_country(n.as_ref()))
@@ -796,22 +880,24 @@ pub fn extract_countries_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Option
 }
 
 /// Detect phone number types for multiple numbers at once
-/// 
+///
 /// # Arguments
 /// * `phone_numbers` - Slice of phone numbers to analyze
-/// 
+///
 /// # Returns
 /// * `Vec<Option<PhoneNumberType>>` - Vector of phone number types
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::detect_phone_number_types_batch;
-/// 
+///
 /// let numbers = ["1234567890", "447123456789"];
 /// let types = detect_phone_number_types_batch(&numbers);
 /// // Returns phone number types for each number
 /// ```
-pub fn detect_phone_number_types_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Vec<Option<PhoneNumberType>> {
+pub fn detect_phone_number_types_batch<T: AsRef<str>>(
+    phone_numbers: &[T],
+) -> Vec<Option<PhoneNumberType>> {
     phone_numbers
         .iter()
         .map(|n| detect_phone_number_type(n.as_ref()))
@@ -819,17 +905,17 @@ pub fn detect_phone_number_types_batch<T: AsRef<str>>(phone_numbers: &[T]) -> Ve
 }
 
 /// Comprehensive batch analysis of phone numbers
-/// 
+///
 /// # Arguments
 /// * `phone_numbers` - Slice of phone numbers to analyze
-/// 
+///
 /// # Returns
 /// * `Vec<PhoneNumberAnalysis>` - Detailed analysis for each number
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::analyze_phone_numbers_batch;
-/// 
+///
 /// let numbers = ["1234567890"];
 /// let analyses = analyze_phone_numbers_batch(&numbers);
 /// ```
@@ -869,22 +955,25 @@ pub struct PhoneNumberAnalysis {
 }
 
 /// Suggest corrections for an invalid phone number
-/// 
+///
 /// # Arguments
 /// * `phone_number` - The invalid phone number
 /// * `country_hint` - Optional country code hint for better suggestions
-/// 
+///
 /// # Returns
 /// * `Vec<String>` - Vector of suggested corrections
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::suggest_phone_number_corrections;
-/// 
+///
 /// let suggestions = suggest_phone_number_corrections("123456789", Some("US"));
 /// // Returns possible corrections like "+1123456789"
 /// ```
-pub fn suggest_phone_number_corrections(phone_number: &str, country_hint: Option<&str>) -> Vec<String> {
+pub fn suggest_phone_number_corrections(
+    phone_number: &str,
+    country_hint: Option<&str>,
+) -> Vec<String> {
     if is_valid_phone_number(phone_number) {
         return vec![phone_number.to_string()]; // Already valid
     }
@@ -944,58 +1033,58 @@ pub fn suggest_phone_number_corrections(phone_number: &str, country_hint: Option
     suggestions.sort();
     suggestions.dedup();
     suggestions.truncate(5); // Limit to 5 suggestions
-    
+
     suggestions
 }
 
 /// Check if a phone number is potentially valid but incorrectly formatted
-/// 
+///
 /// # Arguments
 /// * `phone_number` - The phone number to check
-/// 
+///
 /// # Returns
 /// * `bool` - True if the number might be valid with different formatting
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::is_potentially_valid_phone_number;
-/// 
+///
 /// let might_be_valid = is_potentially_valid_phone_number("123-456-7890");
 /// ```
 pub fn is_potentially_valid_phone_number(phone_number: &str) -> bool {
     let mut cleaned = phone_number.to_string();
     remove_non_digit_character(&mut cleaned);
-    
+
     // Check if length is reasonable for a phone number
     cleaned.len() >= 7 && cleaned.len() <= 15 && !cleaned.chars().all(|c| c == '0')
 }
 
 /// Get the most likely country for a phone number based on patterns
-/// 
+///
 /// # Arguments
 /// * `phone_number` - The phone number to analyze
-/// 
+///
 /// # Returns
 /// * `Option<&'static Country>` - The most likely country, if any
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::guess_country_from_number;
-/// 
+///
 /// let country = guess_country_from_number("1234567890");
 /// ```
 pub fn guess_country_from_number(phone_number: &str) -> Option<&'static Country> {
     let mut cleaned = phone_number.to_string();
     remove_non_digit_character(&mut cleaned);
-    
+
     if cleaned.is_empty() {
         return None;
     }
-    
+
     // Try to match based on length and common patterns
     for country in COUNTRIES.iter() {
         let prefix_len = count_digits(country.prefix);
-        
+
         // Check if number starts with country code
         if cleaned.len() >= prefix_len {
             if let Ok(parsed_prefix) = cleaned[0..prefix_len].parse::<u32>() {
@@ -1007,14 +1096,8 @@ pub fn guess_country_from_number(phone_number: &str) -> Option<&'static Country>
                 }
             }
         }
-        
-        // Check if number length matches country patterns (without country code)
-        if country.phone_lengths.contains(&(cleaned.len() as u8)) {
-            // This is a weak match, prefer exact country code matches
-            continue;
-        }
     }
-    
+
     // Fallback: guess based on common patterns
     match cleaned.len() {
         10 => COUNTRIES.iter().find(|c| c.code == "US"), // Common US format
@@ -1030,7 +1113,6 @@ fn remove_unwanted_character(phone_number: &mut String) {
     // Remove leading zero before country code
     leading_zero_remover(phone_number);
 }
-
 
 fn contains_invalid_character(phone_number: &str) -> bool {
     let mut parentheses_count = 0;
@@ -1052,22 +1134,30 @@ fn contains_invalid_character(phone_number: &str) -> bool {
     parentheses_count != 0
 }
 
-
 fn remove_non_digit_character(phone_number: &mut String) {
     // remove all non digit character - use is_ascii_digit for better performance
     phone_number.retain(|c| c.is_ascii_digit());
 }
 
 /// Strip extension markers (e.g., "ext. 1234", "ext 987") and everything after them.
+///
+/// The "ext" marker must start at a word boundary so that words merely
+/// containing the sequence (e.g. "next", "text") are not mistaken for an
+/// extension marker.
 fn strip_extension(input: &str) -> &str {
     let bytes = input.as_bytes();
     let len = bytes.len();
     for i in 0..len {
+        // Match "ext" + separator first (cheap, short-circuits on the common
+        // non-'e' byte), then require a word boundary before it so that words
+        // merely containing the sequence (e.g. "next", "text") are not mistaken
+        // for an extension marker.
         if i + 4 <= len
             && (bytes[i] == b'e' || bytes[i] == b'E')
             && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
             && (bytes[i + 2] == b't' || bytes[i + 2] == b'T')
             && (bytes[i + 3] == b'.' || bytes[i + 3] == b' ')
+            && (i == 0 || !bytes[i - 1].is_ascii_alphabetic())
         {
             return input[..i].trim_end();
         }
@@ -1077,8 +1167,9 @@ fn strip_extension(input: &str) -> &str {
 
 /// Convert phone keypad vanity letters to digits (e.g., "FLOWERS" → "3569377").
 fn convert_vanity_letters(input: &str) -> String {
-    input.chars().map(|c| {
-        match c.to_ascii_uppercase() {
+    input
+        .chars()
+        .map(|c| match c.to_ascii_uppercase() {
             'A' | 'B' | 'C' => '2',
             'D' | 'E' | 'F' => '3',
             'G' | 'H' | 'I' => '4',
@@ -1088,13 +1179,15 @@ fn convert_vanity_letters(input: &str) -> String {
             'T' | 'U' | 'V' => '8',
             'W' | 'X' | 'Y' | 'Z' => '9',
             _ => c,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 fn leading_zero_remover(phone_number: &mut String) {
     // remove all leading zeros - more efficient approach
-    let first_non_zero = phone_number.find(|c: char| c != '0').unwrap_or(phone_number.len());
+    let first_non_zero = phone_number
+        .find(|c: char| c != '0')
+        .unwrap_or(phone_number.len());
     if first_non_zero > 0 {
         phone_number.drain(0..first_non_zero);
     }
@@ -1103,14 +1196,61 @@ fn leading_zero_remover(phone_number: &mut String) {
 fn extract_country_data(phone_number: &str) -> Option<&'static Country> {
     let bytes = phone_number.as_bytes();
     let len = bytes.len();
-    if len == 0 { return None; }
+    if len == 0 {
+        return None;
+    }
 
     let table = prefix_table();
 
     let d0 = (bytes[0] - b'0') as u32;
-    if d0 > 9 { return None; }
+    if d0 > 9 {
+        return None;
+    }
 
-    // Try 1-digit prefix
+    // NANP (country code 1) is the only place where prefixes are not prefix-free:
+    // the bare "1" (US/CA) is a prefix of the 4-digit territory codes (e.g.
+    // 1268 = Antigua). Handle it separately so the common path stays fast.
+    if d0 == 1 {
+        // Try the 4-digit territory prefix first so it wins over the bare "1".
+        // A cheap bitmap test rules out the common US/Canada case (and any other
+        // non-territory area code) before touching the prefix table.
+        if len >= 4 {
+            let d1 = (bytes[1] - b'0') as u32;
+            let d2 = (bytes[2] - b'0') as u32;
+            let d3 = (bytes[3] - b'0') as u32;
+            if d1 <= 9 && d2 <= 9 && d3 <= 9 {
+                let prefix4 = 1000 + d1 * 100 + d2 * 10 + d3;
+                let idx = (prefix4 - 1000) as usize;
+                if NANP_TERRITORY_BITMAP[idx >> 6] & (1u64 << (idx & 63)) != 0 {
+                    // Populated territory prefix -> in bounds for direct indexing.
+                    let remaining = len - 4;
+                    if remaining < 32 {
+                        let bit = 1u32 << remaining;
+                        for entry in &table[prefix4 as usize] {
+                            if entry.length_mask & bit != 0 {
+                                return Some(entry.country);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fall back to the bare "1" (US/CA).
+        let remaining = len - 1;
+        if remaining < 32 {
+            let bit = 1u32 << remaining;
+            for entry in &table[1] {
+                if entry.length_mask & bit != 0 {
+                    return Some(entry.country);
+                }
+            }
+        }
+        return None;
+    }
+
+    // All other country codes are prefix-free, so the shortest matching prefix
+    // is the only one that can resolve — try 1, then 2, then 3 digits and return
+    // on the first hit. prefix2 (<=99) and prefix3 (<=999) are always in bounds.
     let remaining = len - 1;
     if remaining < 32 {
         let bit = 1u32 << remaining;
@@ -1125,8 +1265,6 @@ fn extract_country_data(phone_number: &str) -> Option<&'static Country> {
         let d1 = (bytes[1] - b'0') as u32;
         if d1 <= 9 {
             let prefix2 = d0 * 10 + d1;
-
-            // Try 2-digit prefix
             let remaining = len - 2;
             if remaining < 32 {
                 let bit = 1u32 << remaining;
@@ -1137,7 +1275,6 @@ fn extract_country_data(phone_number: &str) -> Option<&'static Country> {
                 }
             }
 
-            // Try 3-digit prefix
             if len >= 3 {
                 let d2 = (bytes[2] - b'0') as u32;
                 if d2 <= 9 {
@@ -1161,16 +1298,25 @@ fn extract_country_data(phone_number: &str) -> Option<&'static Country> {
 
 #[inline(always)]
 const fn prefix_digit_count(prefix: u32) -> usize {
-    if prefix >= 100 { 3 }
-    else if prefix >= 10 { 2 }
-    else { 1 }
+    if prefix >= 1000 {
+        4
+    } else if prefix >= 100 {
+        3
+    } else if prefix >= 10 {
+        2
+    } else {
+        1
+    }
 }
 
 /// Push a u32 country prefix as ASCII digits without allocating a String.
 #[inline(always)]
 fn push_prefix_digits(s: &mut String, prefix: u32) {
+    if prefix >= 1000 {
+        s.push((b'0' + (prefix / 1000) as u8) as char);
+    }
     if prefix >= 100 {
-        s.push((b'0' + (prefix / 100) as u8) as char);
+        s.push((b'0' + ((prefix / 100) % 10) as u8) as char);
     }
     if prefix >= 10 {
         s.push((b'0' + ((prefix / 10) % 10) as u8) as char);
@@ -1202,24 +1348,24 @@ pub struct ExtractedPhoneNumber {
 }
 
 /// Extract all phone numbers from free-form text
-/// 
+///
 /// This function scans text and extracts potential phone numbers in various formats:
 /// - International format: +1 234 567 8901
 /// - With parentheses: (234) 567-8901
 /// - With dashes: 234-567-8901
 /// - With dots: 234.567.8901
 /// - Plain digits: 2345678901
-/// 
+///
 /// # Arguments
 /// * `text` - The text to search for phone numbers
-/// 
+///
 /// # Returns
 /// * `Vec<ExtractedPhoneNumber>` - All phone numbers found in the text
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::extract_phone_numbers_from_text;
-/// 
+///
 /// let text = "Call me at +1-202-555-0173 or (415) 555-2671";
 /// let numbers = extract_phone_numbers_from_text(text);
 /// assert_eq!(numbers.len(), 2);
@@ -1228,14 +1374,16 @@ pub fn extract_phone_numbers_from_text(text: &str) -> Vec<ExtractedPhoneNumber> 
     let mut results = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
-    
+
     while i < chars.len() {
         // Look for potential phone number starts
         if is_phone_number_start(&chars, i) {
-            if let Some((phone_str, start_byte, end_byte)) = extract_phone_candidate(text, &chars, i) {
+            if let Some((phone_str, start_byte, end_byte)) =
+                extract_phone_candidate(text, &chars, i)
+            {
                 let normalized = normalize_phone_number(&phone_str);
                 let is_valid = normalized.is_some();
-                
+
                 // Only include if it looks like a real phone number (7+ digits)
                 let digit_count = phone_str.chars().filter(|c| c.is_ascii_digit()).count();
                 if digit_count >= 7 {
@@ -1246,7 +1394,7 @@ pub fn extract_phone_numbers_from_text(text: &str) -> Vec<ExtractedPhoneNumber> 
                         end: end_byte,
                         is_valid,
                     });
-                    
+
                     // Skip past this phone number
                     i = char_index_from_byte(text, end_byte);
                     continue;
@@ -1255,25 +1403,25 @@ pub fn extract_phone_numbers_from_text(text: &str) -> Vec<ExtractedPhoneNumber> 
         }
         i += 1;
     }
-    
+
     results
 }
 
 /// Extract only valid phone numbers from text
-/// 
+///
 /// Similar to `extract_phone_numbers_from_text` but only returns numbers
 /// that pass validation.
-/// 
+///
 /// # Arguments
 /// * `text` - The text to search for phone numbers
-/// 
+///
 /// # Returns
 /// * `Vec<ExtractedPhoneNumber>` - Only valid phone numbers found in the text
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::extract_valid_phone_numbers_from_text;
-/// 
+///
 /// let text = "Call +12025550173 or 123 (invalid)";
 /// let numbers = extract_valid_phone_numbers_from_text(text);
 /// // Returns only the valid +12025550173
@@ -1286,40 +1434,45 @@ pub fn extract_valid_phone_numbers_from_text(text: &str) -> Vec<ExtractedPhoneNu
 }
 
 /// Extract phone numbers from text with a country hint
-/// 
+///
 /// This function attempts to parse national numbers by assuming
 /// a default country when no country code is present.
-/// 
+///
 /// # Arguments
 /// * `text` - The text to search for phone numbers
 /// * `default_country` - ISO 3166-1 alpha-2 country code to use as default
-/// 
+///
 /// # Returns
 /// * `Vec<ExtractedPhoneNumber>` - Phone numbers found in the text
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::extract_phone_numbers_with_country_hint;
-/// 
+///
 /// let text = "Call (202) 555-0173";
 /// let numbers = extract_phone_numbers_with_country_hint(text, "US");
 /// // The number will be normalized as +12025550173
 /// ```
-pub fn extract_phone_numbers_with_country_hint(text: &str, default_country: &str) -> Vec<ExtractedPhoneNumber> {
+pub fn extract_phone_numbers_with_country_hint(
+    text: &str,
+    default_country: &str,
+) -> Vec<ExtractedPhoneNumber> {
     let country = COUNTRIES.iter().find(|c| c.code == default_country);
-    
+
     let mut results = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
-    
+
     while i < chars.len() {
         if is_phone_number_start(&chars, i) {
-            if let Some((phone_str, start_byte, end_byte)) = extract_phone_candidate(text, &chars, i) {
+            if let Some((phone_str, start_byte, end_byte)) =
+                extract_phone_candidate(text, &chars, i)
+            {
                 let digit_count = phone_str.chars().filter(|c| c.is_ascii_digit()).count();
-                
+
                 if digit_count >= 7 {
                     let mut normalized = None;
-                    
+
                     // If we have a country hint, try it first
                     if let Some(c) = country {
                         let mut cleaned = phone_str.clone();
@@ -1329,14 +1482,14 @@ pub fn extract_phone_numbers_with_country_hint(text: &str, default_country: &str
                         let with_country = format!("+{}{}", c.prefix, cleaned);
                         normalized = normalize_phone_number(&with_country);
                     }
-                    
+
                     // Fallback: try to normalize as-is if country hint failed
                     if normalized.is_none() {
                         normalized = normalize_phone_number(&phone_str);
                     }
-                    
+
                     let is_valid = normalized.is_some();
-                    
+
                     results.push(ExtractedPhoneNumber {
                         raw: phone_str,
                         normalized,
@@ -1344,7 +1497,7 @@ pub fn extract_phone_numbers_with_country_hint(text: &str, default_country: &str
                         end: end_byte,
                         is_valid,
                     });
-                    
+
                     i = char_index_from_byte(text, end_byte);
                     continue;
                 }
@@ -1352,15 +1505,15 @@ pub fn extract_phone_numbers_with_country_hint(text: &str, default_country: &str
         }
         i += 1;
     }
-    
+
     results
 }
 
 /// Count how many phone numbers are in the text
-/// 
+///
 /// # Arguments
 /// * `text` - The text to search
-/// 
+///
 /// # Returns
 /// * `usize` - Number of phone numbers found
 pub fn count_phone_numbers_in_text(text: &str) -> usize {
@@ -1368,18 +1521,18 @@ pub fn count_phone_numbers_in_text(text: &str) -> usize {
 }
 
 /// Replace phone numbers in text with a placeholder or transformed version
-/// 
+///
 /// # Arguments
 /// * `text` - The text containing phone numbers
 /// * `replacement` - Function that takes an ExtractedPhoneNumber and returns the replacement string
-/// 
+///
 /// # Returns
 /// * `String` - The text with phone numbers replaced
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::replace_phone_numbers_in_text;
-/// 
+///
 /// let text = "Call me at +12025550173";
 /// let redacted = replace_phone_numbers_in_text(text, |_| "[REDACTED]".to_string());
 /// assert_eq!(redacted, "Call me at [REDACTED]");
@@ -1389,14 +1542,14 @@ where
     F: Fn(&ExtractedPhoneNumber) -> String,
 {
     let numbers = extract_phone_numbers_from_text(text);
-    
+
     if numbers.is_empty() {
         return text.to_string();
     }
-    
+
     let mut result = String::with_capacity(text.len());
     let mut last_end = 0;
-    
+
     for number in &numbers {
         // Add text before this phone number
         result.push_str(&text[last_end..number.start]);
@@ -1404,26 +1557,26 @@ where
         result.push_str(&replacement(number));
         last_end = number.end;
     }
-    
+
     // Add remaining text after last phone number
     result.push_str(&text[last_end..]);
-    
+
     result
 }
 
 /// Redact (mask) phone numbers in text for privacy
-/// 
+///
 /// # Arguments
 /// * `text` - The text containing phone numbers
 /// * `visible_digits` - Number of digits to keep visible at the end (0 to hide all)
-/// 
+///
 /// # Returns
 /// * `String` - The text with phone numbers redacted
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::redact_phone_numbers;
-/// 
+///
 /// let text = "Call +12025550173";
 /// let redacted = redact_phone_numbers(text, 4);
 /// // Returns "Call ***-***-0173" or similar
@@ -1432,22 +1585,22 @@ pub fn redact_phone_numbers(text: &str, visible_digits: usize) -> String {
     replace_phone_numbers_in_text(text, |number| {
         let digits: Vec<char> = number.raw.chars().filter(|c| c.is_ascii_digit()).collect();
         let total = digits.len();
-        
+
         if visible_digits == 0 || visible_digits >= total {
             return "[PHONE]".to_string();
         }
-        
+
         let hidden_count = total - visible_digits;
         let mut result = String::new();
-        
+
         for _ in 0..hidden_count {
             result.push('*');
         }
-        
+
         for &d in &digits[hidden_count..] {
             result.push(d);
         }
-        
+
         result
     })
 }
@@ -1457,19 +1610,19 @@ fn is_phone_number_start(chars: &[char], pos: usize) -> bool {
     if pos >= chars.len() {
         return false;
     }
-    
+
     let c = chars[pos];
-    
+
     // Check for + prefix
     if c == '+' {
         return pos + 1 < chars.len() && chars[pos + 1].is_ascii_digit();
     }
-    
+
     // Check for opening parenthesis (area code)
     if c == '(' {
         return pos + 1 < chars.len() && chars[pos + 1].is_ascii_digit();
     }
-    
+
     // Check for digit that's not part of a longer number/word
     if c.is_ascii_digit() {
         // Make sure it's not in the middle of a word/number
@@ -1481,21 +1634,25 @@ fn is_phone_number_start(chars: &[char], pos: usize) -> bool {
         }
         return true;
     }
-    
+
     false
 }
 
 // Helper function to extract a phone number candidate starting at position
-fn extract_phone_candidate(text: &str, chars: &[char], start_pos: usize) -> Option<(String, usize, usize)> {
+fn extract_phone_candidate(
+    text: &str,
+    chars: &[char],
+    start_pos: usize,
+) -> Option<(String, usize, usize)> {
     let mut end_pos = start_pos;
     let mut digit_count = 0;
     let mut last_digit_pos = start_pos;
     let mut paren_depth = 0;
-    
+
     // Valid phone number characters
     while end_pos < chars.len() {
         let c = chars[end_pos];
-        
+
         match c {
             '+' if end_pos == start_pos => {
                 end_pos += 1;
@@ -1515,8 +1672,10 @@ fn extract_phone_candidate(text: &str, chars: &[char], start_pos: usize) -> Opti
             }
             '-' | '.' | ' ' => {
                 // Only allow these if we've seen digits and more might follow
-                if digit_count > 0 && end_pos + 1 < chars.len() && 
-                   (chars[end_pos + 1].is_ascii_digit() || chars[end_pos + 1] == '(') {
+                if digit_count > 0
+                    && end_pos + 1 < chars.len()
+                    && (chars[end_pos + 1].is_ascii_digit() || chars[end_pos + 1] == '(')
+                {
                     end_pos += 1;
                 } else {
                     break;
@@ -1524,23 +1683,23 @@ fn extract_phone_candidate(text: &str, chars: &[char], start_pos: usize) -> Opti
             }
             _ => break,
         }
-        
+
         // Stop if we have too many digits
         if digit_count > 15 {
             break;
         }
     }
-    
+
     if digit_count < 7 {
         return None;
     }
-    
+
     // Convert char positions to byte positions
     let start_byte = byte_index_from_char(text, start_pos);
     let end_byte = byte_index_from_char(text, last_digit_pos + 1);
-    
+
     let phone_str = text[start_byte..end_byte].to_string();
-    
+
     Some((phone_str, start_byte, end_byte))
 }
 
@@ -1562,14 +1721,14 @@ fn char_index_from_byte(text: &str, byte_index: usize) -> usize {
 // ============================================================================
 
 /// A parsed and validated phone number with equality comparison
-/// 
+///
 /// Two `PhoneNumber` instances are considered equal if they represent
 /// the same phone number, regardless of their original formatting.
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::PhoneNumber;
-/// 
+///
 /// let num1 = PhoneNumber::parse("+12025550173").unwrap();
 /// let num2 = PhoneNumber::parse("12025550173").unwrap();
 /// assert_eq!(num1, num2); // Same number, different formats
@@ -1588,10 +1747,10 @@ pub struct PhoneNumber {
 
 impl PhoneNumber {
     /// Parse a string into a PhoneNumber
-    /// 
+    ///
     /// # Arguments
     /// * `input` - The phone number string to parse
-    /// 
+    ///
     /// # Returns
     /// * `Some(PhoneNumber)` - If the input is a valid phone number
     /// * `None` - If the input is invalid
@@ -1604,13 +1763,13 @@ impl PhoneNumber {
             phone_type: Some(phone_type),
         })
     }
-    
+
     /// Parse a phone number with a country hint for national numbers
-    /// 
+    ///
     /// # Arguments
     /// * `input` - The phone number string to parse
     /// * `country_code` - ISO 3166-1 alpha-2 country code
-    /// 
+    ///
     /// # Returns
     /// * `Some(PhoneNumber)` - If the input is a valid phone number
     /// * `None` - If the input is invalid
@@ -1645,7 +1804,9 @@ impl PhoneNumber {
                 });
             }
             // For national format, only accept if country matches hint
-            if country.map_or(true, |hint| resolved_country.map(|c| c.code) == Some(hint.code)) {
+            if country.map_or(true, |hint| {
+                resolved_country.map(|c| c.code) == Some(hint.code)
+            }) {
                 return Some(PhoneNumber {
                     original: input.to_string(),
                     country: resolved_country,
@@ -1689,12 +1850,12 @@ impl PhoneNumber {
             phone
         })
     }
-    
+
     /// Get the E.164 formatted number
     pub fn e164(&self) -> &str {
         &self.normalized
     }
-    
+
     /// Get the national number (without country code)
     pub fn national_number(&self) -> String {
         if let Some(country) = self.country {
@@ -1704,12 +1865,12 @@ impl PhoneNumber {
             self.normalized.clone()
         }
     }
-    
+
     /// Get the country code digits
     pub fn country_code(&self) -> Option<u32> {
         self.country.map(|c| c.prefix)
     }
-    
+
     /// Format the phone number
     pub fn format(&self, fmt: PhoneFormat) -> String {
         match fmt {
@@ -1728,20 +1889,14 @@ impl PhoneNumber {
                             result.push_str(&formatted);
                             result
                         }
-                        PhoneFormat::National => {
-                            format_national_number(national, country)
-                        }
+                        PhoneFormat::National => format_national_number(national, country),
                         PhoneFormat::RFC3966 => {
-                            let mut result = String::with_capacity(5 + self.normalized.len() + 4);
+                            let grouped = format_national_number_rfc3966(national, country);
+                            let mut result = String::with_capacity(6 + plen + grouped.len());
                             result.push_str("tel:+");
                             push_prefix_digits(&mut result, country.prefix);
                             result.push('-');
-                            for (i, b) in national.bytes().enumerate() {
-                                if i > 0 && i % 3 == 0 {
-                                    result.push('-');
-                                }
-                                result.push(b as char);
-                            }
+                            result.push_str(&grouped);
                             result
                         }
                         _ => unreachable!(),
@@ -1752,17 +1907,17 @@ impl PhoneNumber {
             }
         }
     }
-    
+
     /// Check if this number is mobile
     pub fn is_mobile(&self) -> bool {
         self.phone_type == Some(PhoneNumberType::Mobile)
     }
-    
+
     /// Check if this number is a landline
     pub fn is_landline(&self) -> bool {
         self.phone_type == Some(PhoneNumberType::FixedLine)
     }
-    
+
     /// Check if this number is toll-free
     pub fn is_toll_free(&self) -> bool {
         self.phone_type == Some(PhoneNumberType::TollFree)
@@ -1791,20 +1946,20 @@ impl std::fmt::Display for PhoneNumber {
 
 impl std::str::FromStr for PhoneNumber {
     type Err = &'static str;
-    
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         PhoneNumber::parse(s).ok_or("Invalid phone number")
     }
 }
 
 /// A collection of phone numbers that can be compared and deduplicated
-/// 
+///
 /// This struct provides efficient deduplication and comparison of phone numbers.
-/// 
+///
 /// # Examples
 /// ```
 /// use phonelib::PhoneNumberSet;
-/// 
+///
 /// let mut set = PhoneNumberSet::new();
 /// set.add("+1-202-555-0173");
 /// set.add("(202) 555-0173");
@@ -1822,9 +1977,9 @@ impl PhoneNumberSet {
             numbers: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Add a phone number to the set
-    /// 
+    ///
     /// # Returns
     /// * `true` - If the number was added (not a duplicate)
     /// * `false` - If the number was already in the set
@@ -1837,7 +1992,7 @@ impl PhoneNumberSet {
         }
         false
     }
-    
+
     /// Check if a phone number is in the set
     pub fn contains(&self, phone_number: &str) -> bool {
         if let Some(normalized) = normalize_phone_number(phone_number) {
@@ -1846,27 +2001,27 @@ impl PhoneNumberSet {
             false
         }
     }
-    
+
     /// Get the number of unique phone numbers
     pub fn len(&self) -> usize {
         self.numbers.len()
     }
-    
+
     /// Check if the set is empty
     pub fn is_empty(&self) -> bool {
         self.numbers.is_empty()
     }
-    
+
     /// Get all unique phone numbers
     pub fn iter(&self) -> impl Iterator<Item = &PhoneNumber> {
         self.numbers.values()
     }
-    
+
     /// Get all normalized phone numbers
     pub fn normalized_numbers(&self) -> Vec<&str> {
         self.numbers.keys().map(|s| s.as_str()).collect()
     }
-    
+
     /// Remove a phone number from the set
     pub fn remove(&mut self, phone_number: &str) -> bool {
         if let Some(normalized) = normalize_phone_number(phone_number) {
@@ -1875,7 +2030,7 @@ impl PhoneNumberSet {
             false
         }
     }
-    
+
     /// Find all duplicates of a phone number (different formats)
     pub fn find_duplicates(&self, phone_number: &str) -> Option<&PhoneNumber> {
         let normalized = normalize_phone_number(phone_number)?;
