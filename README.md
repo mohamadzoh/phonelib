@@ -977,7 +977,7 @@ cd phonelib
 cargo test
 cargo test --release
 
-# Lints and formatting (CI enforces both)
+# Lints and formatting
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 
@@ -987,12 +987,13 @@ cargo doc --no-deps
 # Benchmarks (needs a newer rustc than the library MSRV)
 cargo bench
 
-# MSRV check
-cargo +1.74 check --lib
-```
+# MSRV check (rustup needs the full version)
+cargo +1.74.0 check --lib
 
-The README's Rust examples are compiled and run in CI as doctests, so they
-cannot drift from the crate.
+# The README's Rust examples are real doctests - run them against the crate
+cargo build --lib
+rustdoc --test README.md --edition 2021   --extern phonelib=target/debug/libphonelib.rlib   -L dependency=target/debug/deps
+```
 
 ## Changelog
 

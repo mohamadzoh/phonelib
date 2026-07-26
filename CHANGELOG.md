@@ -146,8 +146,8 @@ If you have persisted resolved countries, re-resolve them.
   these countries before upgrading.** Separately, `+1` numbers whose area code
   was never assigned are now rejected by the NANP range check — see **North
   American Numbering Plan** under **Fixed**.
-- **MSRV is declared as 1.74** and is now verified in CI, replacing the
-  previously declared 1.70, which could not be tested at all: the `criterion`
+- **MSRV is declared as 1.74**, replacing the previously declared 1.70, which
+  could not be tested at all: the `criterion`
   dev-dependency requires rustc 1.86, so `cargo test` never ran at the declared
   MSRV. The MSRV applies to the library (`cargo check --lib`), not to the
   development tooling.
@@ -353,7 +353,7 @@ If you have persisted resolved countries, re-resolve them.
   valid phone number at all: 8 snippets printed the opposite of their comments,
   all four formatting examples returned `None`, and the redaction sample had the
   wrong star count. The README was rewritten against the current crate and every
-  Rust block in it is now compiled and run in CI as a doctest.
+  Rust block in it now compiles and passes as a doctest.
 - The README claimed 248 countries against a table of 252, and advertised the
   `GB-CYM` entry as a feature.
 - Specific doc claims corrected: `validate_phone_numbers_batch` claimed
@@ -405,11 +405,6 @@ If you have persisted resolved countries, re-resolve them.
 - **`PhoneNumberSet::try_add`.** (`get` is the `find_duplicates` rename listed
   under Breaking; `remove`, `iter` and `normalized_numbers` already existed in
   1.2.0.)
-- **CI** (`.github/workflows/ci.yml`): build and test on Linux, macOS and
-  Windows in both debug and release; `cargo clippy --all-targets -D warnings`;
-  `cargo fmt --check`; a documentation build with `-D warnings`; an MSRV job
-  that reads `rust-version` out of `Cargo.toml` and runs `cargo check --lib`.
-  The README's code blocks are run as doctests.
 - **`clippy.toml`** pinning Clippy's MSRV, and **`rustfmt.toml`** pinning the
   formatting configuration.
 - **Benchmark coverage** for paths that had none:
