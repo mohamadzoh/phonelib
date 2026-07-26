@@ -20,8 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    env:
-      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
 
@@ -66,6 +64,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # `-- -D warnings` applies to this crate's own targets, not to its
+      # dependencies. A job-wide `RUSTFLAGS: -D warnings` would also deny
+      # warnings inside criterion and everything under it, so a new compiler
+      # release could fail the build over code this crate does not own.
       - run: cargo clippy --all-targets -- -D warnings
 
   fmt:
@@ -111,6 +113,18 @@ jobs:
         run: |
           version=$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' Cargo.toml)
           test -n "$version" || { echo "rust-version not found in Cargo.toml"; exit 1; }
+          # Cargo accepts a two-component `rust-version` ("1.74"), but rustup
+          # only resolves a full MAJOR.MINOR.PATCH channel — "1.74" is not a
+          # toolchain name — so normalise before handing it over.
+          case "$version" in
+            *.*.*) ;;
+            *.*) version="$version.0" ;;
+            *)
+              echo "unexpected rust-version in Cargo.toml: $version"
+              exit 1
+              ;;
+          esac
+          echo "resolved MSRV toolchain: $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust ${{ steps.msrv.outputs.version }}
