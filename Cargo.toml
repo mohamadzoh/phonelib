@@ -1,8 +1,8 @@
 [package]
 name = "phonelib"
-version = "1.2.0"
+version = "2.0.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.74"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 repository = "https://github.com/mohamadzoh/phonelib"
 homepage = "https://github.com/mohamadzoh/phonelib"
@@ -12,10 +12,15 @@ license = "MIT"
 readme = "README.md"
 keywords = ["phone", "validation", "phonenumber", "e164", "international"]
 categories = ["internationalization", "text-processing", "parsing"]
+# `src/*.rs` rather than `src/**/*` deliberately: it ships the library and
+# leaves `src/tests/` (~143 KB of test source) out of the published crate. The
+# test module is declared `#[cfg(test)]`, so a consumer build never looks for
+# it.
 include = [
-    "src/**/*",
+    "src/*.rs",
     "benches/**/*",
     "Cargo.toml",
+    "CHANGELOG.md",
     "LICENSE",
     "README.md",
 ]
@@ -24,8 +29,13 @@ include = [
 name = "phonelib"
 path = "src/lib.rs"
 
+# Intentionally empty, and intentionally without a `[features]` table: the
+# library has no dependencies at all and nothing optional to turn on. Adding one
+# — even an optional one — would put it in every consumer's dependency graph
+# resolution, so it is a deliberate decision, not a convenience.
 [dependencies]
 
+# `criterion` is used only by the benchmarks and never reaches a consumer.
 [dev-dependencies]
 criterion = "0.8.2"
 
@@ -44,6 +54,3 @@ harness = false
 [profile.release]
 lto = true
 codegen-units = 1
-
-[badges]
-maintenance = { status = "actively-developed" }

@@ -1,0 +1,24 @@
+# The crate is formatted with stock rustfmt. Everything below except `edition`
+# is rustfmt's own default; those are pinned explicitly so `cargo fmt --check`
+# in CI cannot start failing because a future rustfmt changed a default out
+# from under us.
+#
+# Only stable options are listed, so `cargo fmt` works on the stable toolchain
+# without `--unstable-features`.
+
+# The one non-default: rustfmt's own default is still `2015`. `cargo fmt`
+# passes `--edition` from Cargo.toml anyway, so this only matters when rustfmt
+# is invoked directly.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+hard_tabs = false
+
+# The repository currently mixes LF and CRLF sources; "Auto" keeps each file's
+# existing convention instead of rewriting every line.
+newline_style = "Auto"
+
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true
+merge_derives = true

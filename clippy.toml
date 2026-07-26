@@ -1,0 +1,4 @@
+# Keep Clippy's suggestions inside the crate's declared MSRV, so it never
+# recommends an API or syntax that would not compile on the oldest supported
+# toolchain. Must be kept in sync with `rust-version` in Cargo.toml.
+msrv = "1.74"

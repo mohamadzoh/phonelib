@@ -1,2757 +1,4767 @@
-#[cfg(test)]
-#[allow(clippy::module_inception)]
-mod tests {
-    use crate::{
-        analyze_phone_numbers_batch, are_phone_numbers_equal, detect_phone_number_type,
-        detect_phone_number_types_batch, extract_countries_batch, extract_country,
-        format_phone_number, generate_random_phone_number, generate_random_phone_numbers,
-        group_equivalent_phone_numbers, guess_country_from_number, is_landline_number,
-        is_mobile_number, is_potentially_valid_phone_number, is_toll_free_number,
-        is_valid_phone_number, normalize_phone_number, normalize_phone_number_in_place,
-        normalize_phone_numbers_batch, suggest_phone_number_corrections,
-        validate_phone_numbers_batch, PhoneFormat, PhoneNumberType,
-    };
+//! Unit tests for the public API.
+//!
+//! `src/lib.rs` declares this module as `#[cfg(test)] mod tests;`, so nothing
+//! here is compiled into a release build or shipped to crates.io. The module
+//! therefore carries no `#[cfg(test)]` wrapper of its own.
+//!
+//! Conventions used throughout:
+//!
+//! * Every assertion is unconditional. No test hides an assertion behind
+//!   `if let Some(..)` or `if !x.is_empty()`, because such a test passes when
+//!   the value it meant to check is absent.
+//! * Tables assert a concrete expected value per row, never a constant.
+//! * [`regressions`] holds one test per fixed audit finding; each names the
+//!   defect it pins.
 
-    struct PhoneNumber {
-        country_code: &'static str,
-        phone_number: &'static str,
+use crate::*;
+
+// ============================================================================
+// Fixtures
+// ============================================================================
+
+/// `(expected ISO code, canonical E.164 number)`.
+///
+/// Every row asserts `extract_country(number).code == expected` **and** that
+/// the number is already canonical, so a resolution regression cannot hide
+/// behind a weak "the country is non-empty" check.
+///
+/// Rows whose calling code is shared with another entry that a number's length
+/// cannot separate live in [`SHARED_CALLING_CODE`] instead — for those there is
+/// no single correct answer from `extract_country` alone.
+const COUNTRY_FIXTURE: &[(&str, &str)] = &[
+    ("US", "+12025550173"),
+    ("GB", "+442079460958"),
+    ("IN", "+919876543210"),
+    ("DE", "+493012345678"),
+    ("AU", "+61412345678"),
+    ("CN", "+8613800138000"),
+    ("FR", "+33123456789"),
+    ("BR", "+5511912345678"),
+    ("JP", "+819012345678"),
+    ("ZA", "+27821234567"),
+    ("LB", "+96179123123"),
+    ("SY", "+963944567890"),
+    ("IQ", "+9647901234567"),
+    ("KW", "+96550012345"),
+    ("SA", "+966512345678"),
+    ("YE", "+967711234567"),
+    ("OM", "+96892123456"),
+    ("PS", "+970599123456"),
+    ("AE", "+971501234567"),
+    ("IL", "+972501234567"),
+    ("BH", "+97336012345"),
+    ("QA", "+97433123456"),
+    ("BT", "+97517123456"),
+    ("MN", "+97699123456"),
+    ("NP", "+9779841234567"),
+    ("IR", "+989123456789"),
+    ("TJ", "+992931234567"),
+    ("TM", "+99365123456"),
+    ("AZ", "+994401234567"),
+    ("GE", "+995591234567"),
+    ("KG", "+996551234567"),
+    ("UZ", "+998971234567"),
+    ("BS", "+12425571234"),
+    ("BB", "+12462311234"),
+    ("AI", "+12642351234"),
+    ("AG", "+12684641234"),
+    ("VG", "+12844681234"),
+    ("VI", "+13406901234"),
+    ("KY", "+13453211234"),
+    ("BM", "+14412341234"),
+    ("GD", "+14732341234"),
+    ("TC", "+16492311234"),
+    ("MS", "+16642351234"),
+    ("MP", "+16702351234"),
+    ("GU", "+16712351234"),
+    ("AS", "+16842351234"),
+    ("SX", "+17215431234"),
+    ("LC", "+17582841234"),
+    ("DM", "+17672351234"),
+    ("VC", "+17842351234"),
+    ("PR", "+17872351234"),
+    ("DO", "+18092351234"),
+    ("DO", "+18292351234"),
+    ("DO", "+18492351234"),
+    ("TT", "+18682351234"),
+    ("KN", "+18692351234"),
+    ("JM", "+18762351234"),
+    ("RE", "+262692691234"),
+    ("ZW", "+263772112345"),
+    ("NA", "+264601234567"),
+    ("MW", "+265991234567"),
+    ("LS", "+26662012345"),
+    ("BW", "+26771123456"),
+    ("SZ", "+26876123456"),
+    ("KM", "+2693112345"),
+    ("SH", "+29022123"),
+    ("ER", "+2917111234"),
+    ("AW", "+2975601234"),
+    ("FO", "+298201234"),
+    ("GL", "+299201234"),
+    ("GI", "+35056012345"),
+    ("PT", "+351201234567"),
+    ("LU", "+35220123456"),
+    ("IE", "+353201234567"),
+    ("IS", "+3544101234"),
+    ("AL", "+355691234567"),
+    ("MT", "+35679012345"),
+    ("CY", "+35796123456"),
+    ("FI", "+358201234567"),
+    ("BG", "+35920123456"),
+    ("LT", "+37061234567"),
+    ("LV", "+37120123456"),
+    ("EE", "+37251234567"),
+    ("MD", "+37368123456"),
+    ("AM", "+37491234567"),
+    ("BY", "+375291234567"),
+    ("AD", "+376312345"),
+    ("MC", "+37761234567"),
+    // San Marino mobiles are 8 digits (6x xxx xxx); the fixed-line plan is
+    // 0549 xxxxxx and keeps its leading zero, like Italy's.
+    ("SM", "+37866123456"),
+    ("UA", "+380501234567"),
+    ("RS", "+381601234567"),
+    ("ME", "+38267123456"),
+    ("HR", "+385911234567"),
+    ("SI", "+38631234567"),
+    ("BA", "+38761123456"),
+    ("MK", "+38970123456"),
+    ("CZ", "+420601123456"),
+    ("SK", "+421912345678"),
+    ("LI", "+4236608811"),
+    ("FK", "+50051234"),
+    ("BZ", "+5018221234"),
+    ("GT", "+50251234567"),
+    ("SV", "+50370123456"),
+    ("HN", "+50491234567"),
+    ("NI", "+50581234567"),
+    ("CR", "+50670123456"),
+    ("PA", "+50761234567"),
+    ("PM", "+508412345"),
+    ("HT", "+50928123456"),
+    ("GP", "+590590123456"),
+    ("BO", "+59171234567"),
+    ("GY", "+5926091234"),
+    ("EC", "+593991234567"),
+    ("GF", "+594694201234"),
+    ("PY", "+595961456789"),
+    ("MQ", "+596696201234"),
+    ("SR", "+5977412345"),
+    ("UY", "+59894231234"),
+    ("CW", "+59995181234"),
+    ("TL", "+67077231234"),
+    ("NF", "+672312345"),
+    ("BN", "+6737123456"),
+    ("NR", "+6745571234"),
+    ("PG", "+67570123456"),
+    ("TO", "+6767715123"),
+    ("SB", "+67762123"),
+    ("VU", "+67824612"),
+    ("FJ", "+6797012345"),
+    ("PW", "+6806201234"),
+    ("WF", "+681501234"),
+    ("CK", "+68222123"),
+    ("KI", "+68660123"),
+    ("NC", "+687501234"),
+    ("TV", "+688901234"),
+    ("PF", "+68987123456"),
+    ("TK", "+6903012"),
+    ("FM", "+6913501234"),
+    ("MH", "+6922471234"),
+    ("KP", "+8501912345678"),
+    ("HK", "+85251234567"),
+    ("MO", "+85366123456"),
+    ("KH", "+85512345678"),
+    ("LA", "+85620911234"),
+    ("BD", "+8801812345678"),
+    ("TW", "+886912345678"),
+    ("MV", "+9607712345"),
+    ("JO", "+962791234567"),
+    ("SG", "+6581234567"),    // Singapore
+    ("MY", "+60121234567"),   // Malaysia
+    ("PH", "+639171234567"),  // Philippines
+    ("TH", "+66812345678"),   // Thailand
+    ("VN", "+84912345678"),   // Vietnam
+    ("PK", "+923001234567"),  // Pakistan
+    ("LK", "+94771234567"),   // Sri Lanka
+    ("AF", "+93700123456"),   // Afghanistan
+    ("MM", "+959123456789"),  // Myanmar
+    ("UZ", "+998901234567"),  // Uzbekistan
+    ("TJ", "+992551234567"),  // Tajikistan
+    ("KG", "+996701234567"),  // Kyrgyzstan
+    ("TM", "+99365123456"),   // Turkmenistan
+    ("MN", "+97688123456"),   // Mongolia
+    ("NP", "+9779812345678"), // Nepal
+    ("AM", "+37494123456"),   // Armenia
+    ("AZ", "+994501234567"),  // Azerbaijan
+    ("GE", "+995555123456"),  // Georgia
+    ("TM", "+99312123456"),   // Turkmenistan
+    ("BH", "+97333123456"),   // Bahrain
+    ("QA", "+97450123456"),   // Qatar
+    ("KW", "+96550123456"),   // Kuwait
+    ("SO", "+252615123456"),  // Somalia
+    ("KE", "+254701234567"),  // Kenya
+    ("TZ", "+255621234567"),  // Tanzania
+    ("UG", "+256701234567"),  // Uganda
+    ("ET", "+251911234567"),  // Ethiopia
+    ("NG", "+2347012345678"), // Nigeria
+    ("GH", "+233501234567"),  // Ghana
+    ("SN", "+221771234567"),  // Senegal
+    ("CI", "+2252721234567"), // Ivory Coast
+    ("ML", "+22365123456"),   // Mali
+    ("ZM", "+260961234567"),  // Zambia
+    ("ZW", "+263771234567"),  // Zimbabwe
+    ("BW", "+26772123456"),   // Botswana
+    ("NA", "+264811234567"),  // Namibia
+    ("MG", "+261341234567"),  // Madagascar
+    ("RE", "+262692123456"),  // Reunion
+    ("MU", "+23057123456"),   // Mauritius
+    ("SC", "+2482512345"),    // Seychelles
+    ("LS", "+26650123456"),   // Lesotho
+    ("CV", "+2389912345"),    // Cape Verde
+    ("ST", "+2399912345"),    // Sao Tome and Principe
+    ("GQ", "+240222123456"),  // Equatorial Guinea
+    ("CD", "+243991234567"),  // Democratic Republic of the Congo
+    ("AO", "+244921234567"),  // Angola
+    ("GW", "+245501234511"),  // Guinea-Bissau
+    ("IO", "+2463801234"),    // British Indian Ocean Territory
+    ("AC", "+247612345"),     // Ascension Island
+    ("SD", "+249911231234"),  // Sudan
+    ("RW", "+250720123456"),  // Rwanda
+    ("DJ", "+25377123123"),   // Djibouti
+    ("BI", "+25779123456"),   // Burundi
+    ("MZ", "+258821234567"),  // Mozambique
+];
+
+/// `(number, primary ISO code, an ISO code that also claims the range)`.
+///
+/// `+7` is Russia and Kazakhstan, `+39` is Italy and the Vatican, `+44` is the
+/// UK and the Crown Dependencies. [`extract_country`] must return the
+/// documented primary; [`extract_countries`] must list the other candidate.
+const SHARED_CALLING_CODE: &[(&str, &str, &str)] = &[
+    ("+77012345678", "RU", "KZ"),
+    ("+79161234567", "RU", "KZ"),
+    ("+390669821234", "IT", "VA"),
+    ("+442079460958", "GB", "JE"),
+    ("+441481123456", "GB", "GG"),
+];
+
+/// Inputs that must be rejected, with the reason each one is rejected for.
+///
+/// The old suite had four negative cases in total; the parser has nine distinct
+/// rejection reasons, and every one of them is exercised here.
+const INVALID_CASES: &[(&str, ParseError)] = &[
+    // No digits at all.
+    ("", ParseError::Empty),
+    ("   ", ParseError::Empty),
+    ("+", ParseError::Empty),
+    ("()", ParseError::Empty),
+    ("0", ParseError::Empty),
+    ("000000", ParseError::Empty),
+    ("---", ParseError::Empty),
+    // Characters that cannot appear in a phone number.
+    ("abc", ParseError::InvalidCharacter),
+    ("HELLO WORLD", ParseError::InvalidCharacter),
+    ("CALL ME NOW PLZ", ParseError::InvalidCharacter),
+    ("ILOVEYOUXX", ParseError::InvalidCharacter),
+    ("invalid_phone_number", ParseError::InvalidCharacter),
+    // Vanity letters need three digits ahead of them; one or two is prose.
+    ("1CALLNOWXXX", ParseError::InvalidCharacter),
+    ("12FLOWERSXX", ParseError::InvalidCharacter),
+    ("+1_202_555_0173", ParseError::InvalidCharacter),
+    ("+1@202#555$0173", ParseError::InvalidCharacter),
+    ("1+2025550173", ParseError::InvalidCharacter),
+    ("12025550173+", ParseError::InvalidCharacter),
+    ("++12025550173", ParseError::InvalidCharacter),
+    ("+1 (234 567-8990", ParseError::InvalidCharacter),
+    ("+1 202 555 0173)", ParseError::InvalidCharacter),
+    ("(((((", ParseError::InvalidCharacter),
+    ("+1\u{0660}2025550173", ParseError::InvalidCharacter),
+    ("+1\n202\t555 0173", ParseError::InvalidCharacter),
+    // Too many significant digits for E.164.
+    ("+1234567890123456", ParseError::TooLong),
+    ("+4312345678901234", ParseError::TooLong),
+    // Fewer digits than any numbering plan accepts.
+    ("12", ParseError::TooShort),
+    ("+12", ParseError::TooShort),
+    ("999", ParseError::TooShort),
+    // The leading digits are not a calling code anyone uses.
+    ("+9999999999999", ParseError::UnknownCountryCode),
+    ("+8709123456", ParseError::UnknownCountryCode),
+    // Known country, wrong national length.
+    ("+12025550", ParseError::InvalidLength),
+    ("+1202555017", ParseError::InvalidLength),
+    ("+120255501730", ParseError::InvalidLength),
+    ("+2126123456", ParseError::InvalidLength),
+    ("+471234567890", ParseError::InvalidLength),
+    ("+6721234567890", ParseError::InvalidLength),
+    ("+1202555017x", ParseError::InvalidLength),
+    // NANP structural checks.
+    ("+11111111111", ParseError::InvalidAreaCode),
+    ("+11231231234", ParseError::InvalidAreaCode),
+    ("+10005550199", ParseError::InvalidAreaCode),
+    ("+19765550199", ParseError::InvalidAreaCode),
+    ("+12021110173", ParseError::InvalidExchange),
+    ("+12021230173", ParseError::InvalidExchange),
+    ("+12020120173", ParseError::InvalidExchange),
+];
+
+/// `(input, is_valid)` — a validation table with a genuinely varying expected
+/// column. The predecessor of this table asserted the constant `true` on all
+/// ten of its rows, which gave it no discriminating power at all.
+const VALIDATION_CASES: &[(&str, bool)] = &[
+    ("+12025550173", true),
+    ("+1 (202) 555-0173", true),
+    ("+1.202.555.0173", true),
+    ("+1-202-555-0173", true),
+    ("+1/202/555/0173", true),
+    ("+1 (202) 555-0173 ext. 99", true),
+    ("1-800-FLOWERS", true),
+    ("+96179123123", true),
+    ("+442079460958", true),
+    ("+44 (0)20 7946 0958", true),
+    ("+390698123456", true),
+    ("tel:+12025550173", true),
+    ("\u{FF0B}\u{FF18}\u{FF11}\u{FF13}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}\u{FF16}\u{FF17}\u{FF18}", true),
+    ("000000000012025550173", true),
+    ("+12025550173\n", true),
+    (" +12025550173 ", true),
+    // Negatives.
+    ("invalid_phone_number", false),
+    ("HELLO WORLD", false),
+    ("", false),
+    ("+", false),
+    ("12", false),
+    ("+1 (234) 567-890", false),
+    ("+1 (234 567-8990", false),
+    ("1+2025550173", false),
+    ("+11111111111", false),
+    ("+12021110173", false),
+    ("+9999999999999", false),
+    ("+1234567890123456", false),
+    ("0000000000+12025550173", false),
+    ("00000000001202555017", false),
+];
+
+/// Helper: resolve a number to its ISO code, panicking with a useful message.
+#[track_caller]
+fn iso(number: &str) -> &'static str {
+    extract_country(number)
+        .unwrap_or_else(|| panic!("{number} did not resolve to a country"))
+        .code
+}
+
+/// Helper: the parse error for an input that must fail.
+#[track_caller]
+fn err(input: &str) -> ParseError {
+    try_normalize_phone_number(input).expect_err(&format!("{input:?} unexpectedly parsed"))
+}
+
+// ============================================================================
+// Validation
+// ============================================================================
+
+mod validation {
+    use super::*;
+
+    #[test]
+    fn every_fixture_row_resolves_to_its_country() {
+        for &(expected, number) in COUNTRY_FIXTURE {
+            assert_eq!(
+                extract_country(number).map(|c| c.code),
+                Some(expected),
+                "{number} must resolve to {expected}"
+            );
+        }
     }
 
-    const PHONE_NUMBERS: [PhoneNumber; 212] = [
-        PhoneNumber {
-            country_code: "US",
-            phone_number: "+12025550173",
-        },
-        PhoneNumber {
-            country_code: "GB",
-            phone_number: "+442079460958",
-        },
-        PhoneNumber {
-            country_code: "IN",
-            phone_number: "+919876543210",
-        },
-        PhoneNumber {
-            country_code: "DE",
-            phone_number: "+493012345678",
-        },
-        PhoneNumber {
-            country_code: "AU",
-            phone_number: "+61412345678",
-        },
-        PhoneNumber {
-            country_code: "CN",
-            phone_number: "+8613800138000",
-        },
-        PhoneNumber {
-            country_code: "FR",
-            phone_number: "+33123456789",
-        },
-        PhoneNumber {
-            country_code: "BR",
-            phone_number: "+5511912345678",
-        },
-        PhoneNumber {
-            country_code: "JP",
-            phone_number: "+819012345678",
-        },
-        PhoneNumber {
-            country_code: "ZA",
-            phone_number: "+27821234567",
-        },
-        PhoneNumber {
-            country_code: "LB",
-            phone_number: "+96179123123",
-        },
-        PhoneNumber {
-            country_code: "SY",
-            phone_number: "+963944567890",
-        },
-        PhoneNumber {
-            country_code: "IQ",
-            phone_number: "+9647901234567",
-        },
-        PhoneNumber {
-            country_code: "KW",
-            phone_number: "+96550012345",
-        },
-        PhoneNumber {
-            country_code: "SA",
-            phone_number: "+966512345678",
-        },
-        PhoneNumber {
-            country_code: "YE",
-            phone_number: "+967711234567",
-        },
-        PhoneNumber {
-            country_code: "OM",
-            phone_number: "+96892123456",
-        },
-        PhoneNumber {
-            country_code: "PS",
-            phone_number: "+970599123456",
-        },
-        PhoneNumber {
-            country_code: "AE",
-            phone_number: "+971501234567",
-        },
-        PhoneNumber {
-            country_code: "IL",
-            phone_number: "+972501234567",
-        },
-        PhoneNumber {
-            country_code: "BH",
-            phone_number: "+97336012345",
-        },
-        PhoneNumber {
-            country_code: "QA",
-            phone_number: "+97433123456",
-        },
-        PhoneNumber {
-            country_code: "BT",
-            phone_number: "+97517123456",
-        },
-        PhoneNumber {
-            country_code: "MN",
-            phone_number: "+97699123456",
-        },
-        PhoneNumber {
-            country_code: "NP",
-            phone_number: "+9779841234567",
-        },
-        PhoneNumber {
-            country_code: "IR",
-            phone_number: "+989123456789",
-        },
-        PhoneNumber {
-            country_code: "TJ",
-            phone_number: "+992931234567",
-        },
-        PhoneNumber {
-            country_code: "TM",
-            phone_number: "+99365123456",
-        },
-        PhoneNumber {
-            country_code: "AZ",
-            phone_number: "+994401234567",
-        },
-        PhoneNumber {
-            country_code: "GE",
-            phone_number: "+995591234567",
-        },
-        PhoneNumber {
-            country_code: "KG",
-            phone_number: "+996551234567",
-        },
-        PhoneNumber {
-            country_code: "UZ",
-            phone_number: "+998971234567",
-        },
-        PhoneNumber {
-            country_code: "BS",
-            phone_number: "+12425571234",
-        },
-        PhoneNumber {
-            country_code: "BB",
-            phone_number: "+12462311234",
-        },
-        PhoneNumber {
-            country_code: "AI",
-            phone_number: "+12642351234",
-        },
-        PhoneNumber {
-            country_code: "AG",
-            phone_number: "+12684641234",
-        },
-        PhoneNumber {
-            country_code: "VG",
-            phone_number: "+12844681234",
-        },
-        PhoneNumber {
-            country_code: "VI",
-            phone_number: "+13406901234",
-        },
-        PhoneNumber {
-            country_code: "KY",
-            phone_number: "+13453211234",
-        },
-        PhoneNumber {
-            country_code: "BM",
-            phone_number: "+14412341234",
-        },
-        PhoneNumber {
-            country_code: "GD",
-            phone_number: "+14732341234",
-        },
-        PhoneNumber {
-            country_code: "TC",
-            phone_number: "+16492311234",
-        },
-        PhoneNumber {
-            country_code: "MS",
-            phone_number: "+16642351234",
-        },
-        PhoneNumber {
-            country_code: "MP",
-            phone_number: "+16702351234",
-        },
-        PhoneNumber {
-            country_code: "GU",
-            phone_number: "+16712351234",
-        },
-        PhoneNumber {
-            country_code: "AS",
-            phone_number: "+16842351234",
-        },
-        PhoneNumber {
-            country_code: "SX",
-            phone_number: "+17215431234",
-        },
-        PhoneNumber {
-            country_code: "LC",
-            phone_number: "+17582841234",
-        },
-        PhoneNumber {
-            country_code: "DM",
-            phone_number: "+17672351234",
-        },
-        PhoneNumber {
-            country_code: "VC",
-            phone_number: "+17842351234",
-        },
-        PhoneNumber {
-            country_code: "PR",
-            phone_number: "+17872351234",
-        },
-        PhoneNumber {
-            country_code: "DO",
-            phone_number: "+18092351234",
-        },
-        PhoneNumber {
-            country_code: "DO",
-            phone_number: "+18292351234",
-        },
-        PhoneNumber {
-            country_code: "DO",
-            phone_number: "+18492351234",
-        },
-        PhoneNumber {
-            country_code: "TT",
-            phone_number: "+18682351234",
-        },
-        PhoneNumber {
-            country_code: "KN",
-            phone_number: "+18692351234",
-        },
-        PhoneNumber {
-            country_code: "JM",
-            phone_number: "+18762351234",
-        },
-        PhoneNumber {
-            country_code: "RE",
-            phone_number: "+262692691234",
-        },
-        PhoneNumber {
-            country_code: "ZW",
-            phone_number: "+263772112345",
-        },
-        PhoneNumber {
-            country_code: "NA",
-            phone_number: "+264601234567",
-        },
-        PhoneNumber {
-            country_code: "MW",
-            phone_number: "+265991234567",
-        },
-        PhoneNumber {
-            country_code: "LS",
-            phone_number: "+26662012345",
-        },
-        PhoneNumber {
-            country_code: "BW",
-            phone_number: "+26771123456",
-        },
-        PhoneNumber {
-            country_code: "SZ",
-            phone_number: "+26876123456",
-        },
-        PhoneNumber {
-            country_code: "KM",
-            phone_number: "+2693112345",
-        },
-        PhoneNumber {
-            country_code: "SH",
-            phone_number: "+29022123",
-        },
-        PhoneNumber {
-            country_code: "ER",
-            phone_number: "+2917111234",
-        },
-        PhoneNumber {
-            country_code: "AW",
-            phone_number: "+2975601234",
-        },
-        PhoneNumber {
-            country_code: "FO",
-            phone_number: "+298201234",
-        },
-        PhoneNumber {
-            country_code: "GL",
-            phone_number: "+299201234",
-        },
-        PhoneNumber {
-            country_code: "GI",
-            phone_number: "+35056012345",
-        },
-        PhoneNumber {
-            country_code: "PT",
-            phone_number: "+351201234567",
-        },
-        PhoneNumber {
-            country_code: "LU",
-            phone_number: "+35220123456",
-        },
-        PhoneNumber {
-            country_code: "IE",
-            phone_number: "+353201234567",
-        },
-        PhoneNumber {
-            country_code: "IS",
-            phone_number: "+3544101234",
-        },
-        PhoneNumber {
-            country_code: "AL",
-            phone_number: "+355691234567",
-        },
-        PhoneNumber {
-            country_code: "MT",
-            phone_number: "+35679012345",
-        },
-        PhoneNumber {
-            country_code: "CY",
-            phone_number: "+35796123456",
-        },
-        PhoneNumber {
-            country_code: "FI",
-            phone_number: "+358201234567",
-        },
-        PhoneNumber {
-            country_code: "BG",
-            phone_number: "+35920123456",
-        },
-        PhoneNumber {
-            country_code: "LT",
-            phone_number: "+37061234567",
-        },
-        PhoneNumber {
-            country_code: "LV",
-            phone_number: "+37120123456",
-        },
-        PhoneNumber {
-            country_code: "EE",
-            phone_number: "+37251234567",
-        },
-        PhoneNumber {
-            country_code: "MD",
-            phone_number: "+37368123456",
-        },
-        PhoneNumber {
-            country_code: "AM",
-            phone_number: "+37491234567",
-        },
-        PhoneNumber {
-            country_code: "BY",
-            phone_number: "+375291234567",
-        },
-        PhoneNumber {
-            country_code: "AD",
-            phone_number: "+376312345",
-        },
-        PhoneNumber {
-            country_code: "MC",
-            phone_number: "+37761234567",
-        },
-        PhoneNumber {
-            country_code: "SM",
-            phone_number: "+378661234567",
-        },
-        PhoneNumber {
-            country_code: "VA",
-            phone_number: "+379612345678",
-        },
-        PhoneNumber {
-            country_code: "UA",
-            phone_number: "+380501234567",
-        },
-        PhoneNumber {
-            country_code: "RS",
-            phone_number: "+381601234567",
-        },
-        PhoneNumber {
-            country_code: "ME",
-            phone_number: "+38267123456",
-        },
-        PhoneNumber {
-            country_code: "HR",
-            phone_number: "+385911234567",
-        },
-        PhoneNumber {
-            country_code: "SI",
-            phone_number: "+38631234567",
-        },
-        PhoneNumber {
-            country_code: "BA",
-            phone_number: "+38761123456",
-        },
-        PhoneNumber {
-            country_code: "MK",
-            phone_number: "+38970123456",
-        },
-        PhoneNumber {
-            country_code: "CZ",
-            phone_number: "+420601123456",
-        },
-        PhoneNumber {
-            country_code: "SK",
-            phone_number: "+421912345678",
-        },
-        PhoneNumber {
-            country_code: "LI",
-            phone_number: "+4236608811",
-        },
-        PhoneNumber {
-            country_code: "FK",
-            phone_number: "+50051234",
-        },
-        PhoneNumber {
-            country_code: "BZ",
-            phone_number: "+5018221234",
-        },
-        PhoneNumber {
-            country_code: "GT",
-            phone_number: "+50251234567",
-        },
-        PhoneNumber {
-            country_code: "SV",
-            phone_number: "+50370123456",
-        },
-        PhoneNumber {
-            country_code: "HN",
-            phone_number: "+50491234567",
-        },
-        PhoneNumber {
-            country_code: "NI",
-            phone_number: "+50581234567",
-        },
-        PhoneNumber {
-            country_code: "CR",
-            phone_number: "+50670123456",
-        },
-        PhoneNumber {
-            country_code: "PA",
-            phone_number: "+50761234567",
-        },
-        PhoneNumber {
-            country_code: "PM",
-            phone_number: "+50850123456",
-        },
-        PhoneNumber {
-            country_code: "HT",
-            phone_number: "+50928123456",
-        },
-        PhoneNumber {
-            country_code: "GP",
-            phone_number: "+590590123456",
-        },
-        PhoneNumber {
-            country_code: "BO",
-            phone_number: "+59171234567",
-        },
-        PhoneNumber {
-            country_code: "GY",
-            phone_number: "+5926091234",
-        },
-        PhoneNumber {
-            country_code: "EC",
-            phone_number: "+593991234567",
-        },
-        PhoneNumber {
-            country_code: "GF",
-            phone_number: "+594694201234",
-        },
-        PhoneNumber {
-            country_code: "PY",
-            phone_number: "+595961456789",
-        },
-        PhoneNumber {
-            country_code: "MQ",
-            phone_number: "+596696201234",
-        },
-        PhoneNumber {
-            country_code: "SR",
-            phone_number: "+5977412345",
-        },
-        PhoneNumber {
-            country_code: "UY",
-            phone_number: "+59894231234",
-        },
-        PhoneNumber {
-            country_code: "CW",
-            phone_number: "+59995181234",
-        },
-        PhoneNumber {
-            country_code: "TL",
-            phone_number: "+67077231234",
-        },
-        PhoneNumber {
-            country_code: "NF",
-            phone_number: "+672312345",
-        },
-        PhoneNumber {
-            country_code: "BN",
-            phone_number: "+6737123456",
-        },
-        PhoneNumber {
-            country_code: "NR",
-            phone_number: "+6745571234",
-        },
-        PhoneNumber {
-            country_code: "PG",
-            phone_number: "+67570123456",
-        },
-        PhoneNumber {
-            country_code: "TO",
-            phone_number: "+67677151234",
-        },
-        PhoneNumber {
-            country_code: "SB",
-            phone_number: "+67762123",
-        },
-        PhoneNumber {
-            country_code: "VU",
-            phone_number: "+67824612",
-        },
-        PhoneNumber {
-            country_code: "FJ",
-            phone_number: "+6797012345",
-        },
-        PhoneNumber {
-            country_code: "PW",
-            phone_number: "+6806201234",
-        },
-        PhoneNumber {
-            country_code: "WF",
-            phone_number: "+681501234",
-        },
-        PhoneNumber {
-            country_code: "CK",
-            phone_number: "+68222123",
-        },
-        PhoneNumber {
-            country_code: "KI",
-            phone_number: "+68660123",
-        },
-        PhoneNumber {
-            country_code: "NC",
-            phone_number: "+687501234",
-        },
-        PhoneNumber {
-            country_code: "TV",
-            phone_number: "+688901234",
-        },
-        PhoneNumber {
-            country_code: "PF",
-            phone_number: "+68987123456",
-        },
-        PhoneNumber {
-            country_code: "TK",
-            phone_number: "+6903012",
-        },
-        PhoneNumber {
-            country_code: "FM",
-            phone_number: "+6913501234",
-        },
-        PhoneNumber {
-            country_code: "MH",
-            phone_number: "+6922471234",
-        },
-        PhoneNumber {
-            country_code: "KP",
-            phone_number: "+8501912345678",
-        },
-        PhoneNumber {
-            country_code: "HK",
-            phone_number: "+85251234567",
-        },
-        PhoneNumber {
-            country_code: "MO",
-            phone_number: "+85366123456",
-        },
-        PhoneNumber {
-            country_code: "KH",
-            phone_number: "+85512345678",
-        },
-        PhoneNumber {
-            country_code: "LA",
-            phone_number: "+85620911234",
-        },
-        PhoneNumber {
-            country_code: "BD",
-            phone_number: "+8801812345678",
-        },
-        PhoneNumber {
-            country_code: "TW",
-            phone_number: "+886912345678",
-        },
-        PhoneNumber {
-            country_code: "MV",
-            phone_number: "+9607712345",
-        },
-        PhoneNumber {
-            country_code: "JO",
-            phone_number: "+962791234567",
-        },
-        PhoneNumber {
-            country_code: "SG",
-            phone_number: "+6581234567",
-        }, // Singapore
-        PhoneNumber {
-            country_code: "MY",
-            phone_number: "+60121234567",
-        }, // Malaysia
-        PhoneNumber {
-            country_code: "PH",
-            phone_number: "+639171234567",
-        }, // Philippines
-        PhoneNumber {
-            country_code: "TH",
-            phone_number: "+66812345678",
-        }, // Thailand
-        PhoneNumber {
-            country_code: "VN",
-            phone_number: "+84912345678",
-        }, // Vietnam
-        PhoneNumber {
-            country_code: "PK",
-            phone_number: "+923001234567",
-        }, // Pakistan
-        PhoneNumber {
-            country_code: "LK",
-            phone_number: "+94771234567",
-        }, // Sri Lanka
-        PhoneNumber {
-            country_code: "AF",
-            phone_number: "+93700123456",
-        }, // Afghanistan
-        PhoneNumber {
-            country_code: "MM",
-            phone_number: "+959123456789",
-        }, // Myanmar
-        PhoneNumber {
-            country_code: "KZ",
-            phone_number: "+77012345678",
-        }, // Kazakhstan
-        PhoneNumber {
-            country_code: "UZ",
-            phone_number: "+998901234567",
-        }, // Uzbekistan
-        PhoneNumber {
-            country_code: "TJ",
-            phone_number: "+992551234567",
-        }, // Tajikistan
-        PhoneNumber {
-            country_code: "KG",
-            phone_number: "+996701234567",
-        }, // Kyrgyzstan
-        PhoneNumber {
-            country_code: "TM",
-            phone_number: "+993651234567",
-        }, // Turkmenistan
-        PhoneNumber {
-            country_code: "MN",
-            phone_number: "+97688123456",
-        }, // Mongolia
-        PhoneNumber {
-            country_code: "NP",
-            phone_number: "+9779812345678",
-        }, // Nepal
-        PhoneNumber {
-            country_code: "BT",
-            phone_number: "+97517123456",
-        }, // Bhutan
-        PhoneNumber {
-            country_code: "AM",
-            phone_number: "+37494123456",
-        }, // Armenia
-        PhoneNumber {
-            country_code: "AZ",
-            phone_number: "+994501234567",
-        }, // Azerbaijan
-        PhoneNumber {
-            country_code: "GE",
-            phone_number: "+995555123456",
-        }, // Georgia
-        PhoneNumber {
-            country_code: "TM",
-            phone_number: "+99312123456",
-        }, // Turkmenistan
-        PhoneNumber {
-            country_code: "AE",
-            phone_number: "+971501234567",
-        }, // UAE
-        PhoneNumber {
-            country_code: "BH",
-            phone_number: "+97333123456",
-        }, // Bahrain
-        PhoneNumber {
-            country_code: "QA",
-            phone_number: "+97450123456",
-        }, // Qatar
-        PhoneNumber {
-            country_code: "KW",
-            phone_number: "+96550123456",
-        }, // Kuwait
-        PhoneNumber {
-            country_code: "OM",
-            phone_number: "+96892123456",
-        }, // Oman
-        PhoneNumber {
-            country_code: "YE",
-            phone_number: "+967711234567",
-        }, // Yemen
-        PhoneNumber {
-            country_code: "SO",
-            phone_number: "+252615123456",
-        }, // Somalia
-        PhoneNumber {
-            country_code: "KE",
-            phone_number: "+254701234567",
-        }, // Kenya
-        PhoneNumber {
-            country_code: "TZ",
-            phone_number: "+255621234567",
-        }, // Tanzania
-        PhoneNumber {
-            country_code: "UG",
-            phone_number: "+256701234567",
-        }, // Uganda
-        PhoneNumber {
-            country_code: "ET",
-            phone_number: "+251911234567",
-        }, // Ethiopia
-        PhoneNumber {
-            country_code: "NG",
-            phone_number: "+234701234567",
-        }, // Nigeria
-        PhoneNumber {
-            country_code: "GH",
-            phone_number: "+233501234567",
-        }, // Ghana
-        PhoneNumber {
-            country_code: "SN",
-            phone_number: "+221771234567",
-        }, // Senegal
-        PhoneNumber {
-            country_code: "CI",
-            phone_number: "+22551234567",
-        }, // Ivory Coast
-        PhoneNumber {
-            country_code: "ML",
-            phone_number: "+22365123456",
-        }, // Mali
-        PhoneNumber {
-            country_code: "ZM",
-            phone_number: "+260961234567",
-        }, // Zambia
-        PhoneNumber {
-            country_code: "ZW",
-            phone_number: "+263771234567",
-        }, // Zimbabwe
-        PhoneNumber {
-            country_code: "BW",
-            phone_number: "+26772123456",
-        }, // Botswana
-        PhoneNumber {
-            country_code: "NA",
-            phone_number: "+264811234567",
-        }, // Namibia
-        PhoneNumber {
-            country_code: "MG",
-            phone_number: "+261341234567",
-        }, // Madagascar
-        PhoneNumber {
-            country_code: "RE",
-            phone_number: "+262692123456",
-        }, // Reunion
-        PhoneNumber {
-            country_code: "MU",
-            phone_number: "+23057123456",
-        }, // Mauritius
-        PhoneNumber {
-            country_code: "SC",
-            phone_number: "+2482512345",
-        }, // Seychelles
-        PhoneNumber {
-            country_code: "MW",
-            phone_number: "+265991234567",
-        }, // Malawi
-        PhoneNumber {
-            country_code: "LS",
-            phone_number: "+26650123456",
-        }, // Lesotho
-        PhoneNumber {
-            country_code: "SZ",
-            phone_number: "+26876123456",
-        }, // Eswatini
-        PhoneNumber {
-            country_code: "CV",
-            phone_number: "+2389912345",
-        }, // Cape Verde
-        PhoneNumber {
-            country_code: "ST",
-            phone_number: "+2399912345",
-        }, // Sao Tome and Principe
-        PhoneNumber {
-            country_code: "GQ",
-            phone_number: "+240222123456",
-        }, // Equatorial Guinea
-        PhoneNumber {
-            country_code: "CD",
-            phone_number: "+243991234567",
-        }, // Democratic Republic of the Congo
-        PhoneNumber {
-            country_code: "AO",
-            phone_number: "+244921234567",
-        }, // Angola
-        PhoneNumber {
-            country_code: "GW",
-            phone_number: "+245501234511",
-        }, // Guinea-Bissau
-        PhoneNumber {
-            country_code: "IO",
-            phone_number: "+2463801234",
-        }, // British Indian Ocean Territory
-        PhoneNumber {
-            country_code: "AC",
-            phone_number: "+2473612",
-        }, // Ascension Island
-        PhoneNumber {
-            country_code: "SC",
-            phone_number: "+2482512345",
-        }, // Seychelles
-        PhoneNumber {
-            country_code: "SD",
-            phone_number: "+249911231234",
-        }, // Sudan
-        PhoneNumber {
-            country_code: "RW",
-            phone_number: "+250720123456",
-        }, // Rwanda
-        PhoneNumber {
-            country_code: "SO",
-            phone_number: "+252615123456",
-        }, // Somalia
-        PhoneNumber {
-            country_code: "DJ",
-            phone_number: "+25377123123",
-        }, // Djibouti
-        PhoneNumber {
-            country_code: "BI",
-            phone_number: "+25779123456",
-        }, // Burundi
-        PhoneNumber {
-            country_code: "MZ",
-            phone_number: "+258821234567",
-        }, // Mozambiquez
-        PhoneNumber {
-            country_code: "GB-CYM",
-            phone_number: "+442079460958",
-        }, // Great Britain - Cymru
+    #[test]
+    fn every_fixture_row_is_valid_and_already_canonical() {
+        for &(expected, number) in COUNTRY_FIXTURE {
+            assert!(is_valid_phone_number(number), "{number} must be valid");
+            assert_eq!(
+                normalize_phone_number(number).as_deref(),
+                Some(number),
+                "{number} must already be canonical E.164"
+            );
+
+            let parsed =
+                PhoneNumber::parse(number).unwrap_or_else(|| panic!("{number} must parse"));
+            assert_eq!(parsed.e164(), number);
+            assert_eq!(parsed.country().code, expected);
+            assert_eq!(parsed.format(PhoneFormat::E164), number);
+            assert_eq!(
+                normalize_phone_number(&parsed.format(PhoneFormat::RFC3966)).as_deref(),
+                Some(number),
+                "RFC 3966 output of {number} must re-parse"
+            );
+        }
+    }
+
+    #[test]
+    fn every_fixture_row_round_trips_through_national_format() {
+        for &(_, number) in COUNTRY_FIXTURE {
+            let parsed = PhoneNumber::parse(number).unwrap();
+            let national = parsed.format(PhoneFormat::National);
+            let back = PhoneNumber::parse_with_country(&national, parsed.country().code)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "national form {national:?} of {number} must re-parse as {}",
+                        parsed.country().code
+                    )
+                });
+            assert_eq!(back.e164(), number, "national round trip changed {number}");
+        }
+    }
+
+    #[test]
+    fn shared_calling_codes_resolve_to_the_documented_primary() {
+        for &(number, primary, also) in SHARED_CALLING_CODE {
+            assert_eq!(iso(number), primary, "{number} must resolve to {primary}");
+
+            let candidates: Vec<&str> = extract_countries(number).iter().map(|c| c.code).collect();
+            assert_eq!(
+                candidates.first(),
+                Some(&primary),
+                "{number}: the primary must come first"
+            );
+            assert!(
+                candidates.contains(&also),
+                "{number}: {also} must be listed as a candidate, got {candidates:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_table() {
+        for &(input, expected) in VALIDATION_CASES {
+            assert_eq!(
+                is_valid_phone_number(input),
+                expected,
+                "is_valid_phone_number({input:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_inputs_report_the_right_reason() {
+        for &(input, expected) in INVALID_CASES {
+            assert!(!is_valid_phone_number(input), "{input:?} must not be valid");
+            assert_eq!(err(input), expected, "error for {input:?}");
+        }
+    }
+
+    #[test]
+    fn every_parse_error_variant_is_reachable() {
+        use std::collections::BTreeSet;
+
+        let mut seen = BTreeSet::new();
+        for &(input, _) in INVALID_CASES {
+            seen.insert(format!("{:?}", err(input)));
+        }
+        seen.insert(format!(
+            "{:?}",
+            PhoneNumber::try_parse_with_country("020 7946 0958", "ZZ").unwrap_err()
+        ));
+
+        for variant in [
+            "Empty",
+            "InvalidCharacter",
+            "TooLong",
+            "TooShort",
+            "UnknownCountryCode",
+            "InvalidLength",
+            "InvalidAreaCode",
+            "InvalidExchange",
+            "UnknownCountry",
+        ] {
+            assert!(
+                seen.contains(variant),
+                "ParseError::{variant} is never produced by the suite; reachable: {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_never_disagrees_with_normalize() {
+        let corpus: Vec<&str> = VALIDATION_CASES
+            .iter()
+            .map(|&(s, _)| s)
+            .chain(INVALID_CASES.iter().map(|&(s, _)| s))
+            .chain(COUNTRY_FIXTURE.iter().map(|&(_, s)| s))
+            .collect();
+
+        for input in corpus {
+            assert_eq!(
+                is_valid_phone_number(input),
+                normalize_phone_number(input).is_some(),
+                "is_valid_phone_number and normalize_phone_number disagree on {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_messages_are_distinct_and_non_empty() {
+        use std::collections::BTreeSet;
+
+        let errors = [
+            ParseError::Empty,
+            ParseError::InvalidCharacter,
+            ParseError::TooLong,
+            ParseError::TooShort,
+            ParseError::UnknownCountryCode,
+            ParseError::InvalidLength,
+            ParseError::InvalidAreaCode,
+            ParseError::InvalidExchange,
+            ParseError::UnknownCountry,
+        ];
+        let messages: BTreeSet<String> = errors.iter().map(ToString::to_string).collect();
+        assert_eq!(messages.len(), errors.len(), "Display must be injective");
+        assert!(messages.iter().all(|m| !m.is_empty()));
+
+        // ParseError is a real error type, not an opaque &'static str.
+        let boxed: Box<dyn std::error::Error> = Box::new(ParseError::TooShort);
+        assert_eq!(
+            boxed.to_string(),
+            "fewer digits than any numbering plan accepts"
+        );
+    }
+}
+
+// ============================================================================
+// Normalization
+// ============================================================================
+
+mod normalization {
+    use super::*;
+
+    #[test]
+    fn normalizes_every_written_form_of_one_number() {
+        for input in [
+            "+12025550173",
+            "+1 202 555 0173",
+            "+1 (202) 555-0173",
+            "+1.202.555.0173",
+            "+1-202-555-0173",
+            "+1/202/555/0173",
+            "12025550173",
+            " +12025550173 ",
+            "tel:+12025550173",
+            "+1\u{00A0}202\u{2013}555\u{2013}0173",
+            "+1 202-555-0173 ext. 42",
+        ] {
+            assert_eq!(
+                normalize_phone_number(input).as_deref(),
+                Some("+12025550173"),
+                "normalize_phone_number({input:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn is_idempotent() {
+        for &(_, number) in COUNTRY_FIXTURE {
+            let once = normalize_phone_number(number).unwrap();
+            let twice = normalize_phone_number(&once).unwrap();
+            assert_eq!(once, twice, "normalization of {number} is not idempotent");
+        }
+    }
+
+    #[test]
+    fn strips_idd_and_trunk_prefixes_before_the_calling_code() {
+        for input in [
+            "00442079460958",
+            "0000000000442079460958",
+            "+44 (0)20 7946 0958",
+            "+44 0 20 7946 0958",
+        ] {
+            assert_eq!(
+                normalize_phone_number(input).as_deref(),
+                Some("+442079460958"),
+                "normalize_phone_number({input:?})"
+            );
+        }
+
+        // A *single* leading zero is a national trunk prefix, not the `00`
+        // international access code, so it is not a marker on its own and the
+        // number stays ambiguous.
+        assert_eq!(
+            try_normalize_phone_number("0442079460958").unwrap_err(),
+            ParseError::MissingCallingCode
+        );
+        assert_eq!(
+            PhoneNumber::parse_with_country("0442079460958", "GB")
+                .unwrap()
+                .e164(),
+            "+442079460958"
+        );
+    }
+
+    #[test]
+    fn preserves_a_significant_italian_leading_zero() {
+        assert_eq!(
+            normalize_phone_number("+390698123456").as_deref(),
+            Some("+390698123456")
+        );
+        assert_eq!(
+            normalize_phone_number("+39 06 6982 1234").as_deref(),
+            Some("+390669821234")
+        );
+        // Italian mobiles carry no leading zero and must stay distinct.
+        assert_eq!(
+            normalize_phone_number("+393331234567").as_deref(),
+            Some("+393331234567")
+        );
+    }
+
+    #[test]
+    fn in_place_leaves_the_normalized_value_in_the_buffer() {
+        let mut buffer = "+1 (202) 555-0173".to_string();
+        let returned = normalize_phone_number_in_place(&mut buffer);
+        assert_eq!(returned.as_deref(), Some("+12025550173"));
+        assert_eq!(buffer, "+12025550173");
+
+        // A second call is therefore a no-op rather than a failure.
+        let again = normalize_phone_number_in_place(&mut buffer);
+        assert_eq!(again.as_deref(), Some("+12025550173"));
+        assert_eq!(buffer, "+12025550173");
+    }
+
+    #[test]
+    fn in_place_leaves_the_buffer_untouched_on_failure() {
+        for original in ["nonsense", "garbage", "hello ext. 5", "", "+"] {
+            let mut buffer = original.to_string();
+            assert_eq!(normalize_phone_number_in_place(&mut buffer), None);
+            assert_eq!(buffer, original, "buffer was mutated for {original:?}");
+        }
+    }
+
+    #[test]
+    fn in_place_agrees_with_the_borrowing_function() {
+        let corpus: Vec<&str> = VALIDATION_CASES
+            .iter()
+            .map(|&(s, _)| s)
+            .chain(INVALID_CASES.iter().map(|&(s, _)| s))
+            .chain([
+                "000000000012025550173",
+                "0000000000000000000012025550173",
+                "0000000000+12025550173",
+                "+0000000000442079460958",
+                "00000000001202555017",
+                "000 000 000 44 20 7946 0958",
+            ])
+            .collect();
+
+        for input in corpus {
+            let borrowed = normalize_phone_number(input);
+            let mut buffer = input.to_string();
+            let in_place = normalize_phone_number_in_place(&mut buffer);
+            assert_eq!(
+                borrowed, in_place,
+                "normalize_phone_number and _in_place disagree on {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn try_variant_reports_the_reason() {
+        assert_eq!(
+            try_normalize_phone_number("+12025550173"),
+            Ok("+12025550173".to_string())
+        );
+        assert_eq!(
+            try_normalize_phone_number("+9999999999999"),
+            Err(ParseError::UnknownCountryCode)
+        );
+        assert_eq!(try_normalize_phone_number(""), Err(ParseError::Empty));
+    }
+
+    #[test]
+    fn extensions_are_never_folded_into_the_subscriber_number() {
+        for (input, expected) in [
+            ("+1 202-555-0173 ext. 42", "+12025550173"),
+            ("+1 202-555-0173 x42", "+12025550173"),
+            ("+43 1 2345678 x1", "+4312345678"),
+            ("+43 1 2345678 ext-1", "+4312345678"),
+            ("+39 06 9812345 x9", "+39069812345"),
+        ] {
+            assert_eq!(
+                normalize_phone_number(input).as_deref(),
+                Some(expected),
+                "normalize_phone_number({input:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn fullwidth_forms_normalize_like_their_ascii_equivalents() {
+        assert_eq!(
+            normalize_phone_number("\u{FF0B}\u{FF18}\u{FF11}\u{FF13}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}\u{FF16}\u{FF17}\u{FF18}"),
+            normalize_phone_number("+81312345678")
+        );
+    }
+}
+
+// ============================================================================
+// Country resolution
+// ============================================================================
+
+mod country_resolution {
+    use super::*;
+
+    #[test]
+    fn calling_codes_shared_with_a_territory_resolve_to_the_sovereign_state() {
+        // Each of these used to be hijacked by a shadowing table entry.
+        assert_eq!(iso("+442079460958"), "GB");
+        assert_eq!(iso("+441481123456"), "GB");
+        assert_eq!(iso("+441534123456"), "GB");
+        assert_eq!(iso("+79161234567"), "RU");
+        assert_eq!(iso("+212612345678"), "MA");
+        assert_eq!(iso("+358401234567"), "FI");
+        assert_eq!(iso("+590590123456"), "GP");
+        assert_eq!(iso("+672312345"), "NF");
+        assert_eq!(iso("+4791234567"), "NO");
+        assert_eq!(iso("+262639123456"), "RE");
+    }
+
+    #[test]
+    fn nanp_area_codes_attribute_exactly() {
+        for (number, expected) in [
+            ("+12025550173", "US"),
+            ("+14155552671", "US"),
+            ("+14165550198", "CA"),
+            ("+15145550199", "CA"),
+            ("+16045550199", "CA"),
+            ("+16135550199", "CA"),
+            ("+12685550173", "AG"),
+            ("+12465550173", "BB"),
+            ("+18765550123", "JM"),
+            ("+16585550123", "JM"),
+            ("+18095550123", "DO"),
+            ("+17875550123", "PR"),
+        ] {
+            assert_eq!(iso(number), expected, "{number}");
+        }
+    }
+
+    #[test]
+    fn nanp_rejects_structurally_impossible_numbers() {
+        assert_eq!(err("+11111111111"), ParseError::InvalidAreaCode);
+        assert_eq!(err("+11231231234"), ParseError::InvalidAreaCode);
+        assert_eq!(err("+10005550199"), ParseError::InvalidAreaCode);
+        assert_eq!(err("+12021110173"), ParseError::InvalidExchange);
+        assert_eq!(err("+12020120173"), ParseError::InvalidExchange);
+    }
+
+    #[test]
+    fn bare_national_numbers_do_not_default_to_the_united_states() {
+        // "2025550173" is ten digits with no calling code. Reading it as US was
+        // a bug; so is reading it as the Egyptian +20 2555 0173 that its digits
+        // also spell. Without a marker there is no way to choose, so it is
+        // rejected rather than guessed.
+        for bare in [
+            "2025550173",
+            "(202) 555-0173",
+            "202-555-0173",
+            "020 7946 0958",
+        ] {
+            assert_eq!(
+                try_normalize_phone_number(bare).unwrap_err(),
+                ParseError::MissingCallingCode,
+                "{bare} must not resolve to any country"
+            );
+        }
+        // The explicit forms both work and are the documented way to get US.
+        assert_eq!(iso("+12025550173"), "US");
+        assert_eq!(
+            PhoneNumber::parse_with_country("2025550173", "US")
+                .unwrap()
+                .e164(),
+            "+12025550173"
+        );
+    }
+
+    #[test]
+    fn extract_countries_lists_every_candidate_primary_first() {
+        assert_eq!(
+            extract_countries("+79161234567")
+                .iter()
+                .map(|c| c.code)
+                .collect::<Vec<_>>(),
+            ["RU", "KZ"]
+        );
+        assert_eq!(
+            extract_countries("+390669821234")
+                .iter()
+                .map(|c| c.code)
+                .collect::<Vec<_>>(),
+            ["IT", "VA"]
+        );
+        assert_eq!(
+            extract_countries("+442079460958")
+                .iter()
+                .map(|c| c.code)
+                .collect::<Vec<_>>(),
+            ["GB", "GG", "IM", "JE"]
+        );
+        // Unambiguous numbers yield exactly one candidate.
+        assert_eq!(
+            extract_countries("+12025550173")
+                .iter()
+                .map(|c| c.code)
+                .collect::<Vec<_>>(),
+            ["US"]
+        );
+    }
+
+    #[test]
+    fn extract_countries_is_empty_for_unparseable_input() {
+        assert!(extract_countries("nonsense").is_empty());
+        assert!(extract_countries("").is_empty());
+        assert!(extract_countries("+2126123456").is_empty());
+    }
+
+    #[test]
+    fn guess_agrees_with_extract_for_valid_numbers() {
+        for &(_, number) in COUNTRY_FIXTURE {
+            assert_eq!(
+                guess_country_from_number(number).map(|c| c.code),
+                extract_country(number).map(|c| c.code),
+                "guess and extract disagree on {number}"
+            );
+        }
+    }
+
+    #[test]
+    fn guess_falls_back_to_the_leading_calling_code() {
+        assert_eq!(
+            guess_country_from_number("442079460958").map(|c| c.code),
+            Some("GB")
+        );
+        assert_eq!(
+            guess_country_from_number("79161234567").map(|c| c.code),
+            Some("RU")
+        );
+        assert_eq!(
+            guess_country_from_number("493012345678").map(|c| c.code),
+            Some("DE")
+        );
+        assert_eq!(
+            guess_country_from_number("33123456789").map(|c| c.code),
+            Some("FR")
+        );
+        assert_eq!(guess_country_from_number("").map(|c| c.code), None);
+    }
+
+    /// The fallback scan tries the longest calling code first, so a NANP
+    /// territory's four-digit code beats the bare `1`. Every input here is
+    /// *invalid* — that is what forces the fallback rather than
+    /// [`extract_country`] — and every one of them resolves to the plain `US`
+    /// if the scan is run shortest-first instead.
+    #[test]
+    fn guess_prefers_the_longest_calling_code() {
+        for (digits, expected, calling_code) in [
+            ("1268555017", "AG", 1268u32),
+            ("18095550", "DO", 1809),
+            ("17875550", "PR", 1787),
+            ("1441555017", "BM", 1441),
+        ] {
+            assert!(
+                !is_valid_phone_number(digits),
+                "{digits} must be invalid, or it never reaches the fallback scan"
+            );
+            let guessed = guess_country_from_number(digits)
+                .unwrap_or_else(|| panic!("{digits} must still be guessable"));
+            assert_eq!(guessed.code, expected, "{digits}");
+            assert_eq!(guessed.prefix, calling_code, "{digits}");
+        }
+    }
+}
+
+// ============================================================================
+// Country table
+// ============================================================================
+
+mod country_table {
+    use super::*;
+
+    #[test]
+    fn table_is_structurally_sound() {
+        assert!(
+            countries().len() > 200,
+            "the table lost most of its entries"
+        );
+
+        for country in countries() {
+            assert!(!country.name.is_empty(), "{:?} has no name", country.code);
+            assert_eq!(
+                country.code.len(),
+                2,
+                "{:?} is not an ISO 3166-1 alpha-2 code",
+                country.code
+            );
+            assert!(
+                country.code.bytes().all(|b| b.is_ascii_uppercase()),
+                "{:?} is not upper-case ASCII",
+                country.code
+            );
+            assert!(
+                !country.phone_lengths.is_empty(),
+                "{} has no accepted lengths",
+                country.code
+            );
+
+            let prefix_digits = country.prefix.to_string().len();
+            assert!(
+                (1..=4).contains(&prefix_digits),
+                "{} has a {prefix_digits}-digit calling code",
+                country.code
+            );
+            for &length in country.phone_lengths {
+                assert!(
+                    prefix_digits + length as usize <= 15,
+                    "{} accepts a national length of {length}, which exceeds E.164 with a {prefix_digits}-digit calling code",
+                    country.code
+                );
+                assert!(
+                    length >= 4,
+                    "{} accepts an implausible length {length}",
+                    country.code
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn table_contains_no_pseudo_countries() {
+        for fake in ["GB-CYM", "XX", "ZZ"] {
+            assert!(
+                country_by_code(fake).is_none(),
+                "{fake} must not be in the country table"
+            );
+        }
+        // Uninhabited territories with fabricated numbering plans are gone.
+        for uninhabited in ["BV", "HM", "AQ", "TF"] {
+            assert!(
+                country_by_code(uninhabited).is_none(),
+                "{uninhabited} has no numbering plan and must not be in the table"
+            );
+        }
+    }
+
+    #[test]
+    fn country_by_code_lookup() {
+        let japan = country_by_code("JP").expect("JP must be in the table");
+        assert_eq!(japan.prefix, 81);
+        assert_eq!(japan.name, "Japan");
+        assert!(
+            japan.phone_lengths.contains(&9),
+            "JP must accept 9-digit nationals"
+        );
+
+        assert!(country_by_code("ZZ").is_none());
+        assert!(country_by_code("").is_none());
+        // Casing is not meaningful in an ISO 3166-1 code, so lookup ignores it.
+        // A code that is not in the table is still rejected.
+        assert_eq!(country_by_code("jp"), country_by_code("JP"));
+        assert_eq!(country_by_code("Jp"), country_by_code("JP"));
+        assert!(country_by_code("JPN").is_none());
+    }
+
+    #[test]
+    fn countries_by_code_returns_every_overlay() {
+        let dominican: Vec<u32> = countries_by_code("DO").iter().map(|c| c.prefix).collect();
+        assert_eq!(dominican, [1809, 1829, 1849]);
+
+        let puerto_rico: Vec<u32> = countries_by_code("PR").iter().map(|c| c.prefix).collect();
+        assert_eq!(puerto_rico, [1787, 1939]);
+
+        let jamaica: Vec<u32> = countries_by_code("JM").iter().map(|c| c.prefix).collect();
+        assert!(
+            jamaica.contains(&1876) && jamaica.contains(&1658),
+            "{jamaica:?}"
+        );
+
+        assert!(countries_by_code("ZZ").is_empty());
+    }
+
+    /// A copy of `PRIMARY_FOR_PREFIX` (src/lib.rs): `(calling code, sample
+    /// number, every claimant in the order the crate reports them)`.
+    ///
+    /// The first ISO code of each row is the designated primary. Without the
+    /// table the winner would be an accident of declaration order in
+    /// `src/constants.rs`, which is how `+7` once resolved to Kazakhstan and
+    /// `+212` to Western Sahara.
+    const SHARED_CALLING_CODES: &[(u32, &str, &[&str])] = &[
+        (1, "+12025550173", &["US", "CA"]),
+        (7, "+79161234567", &["RU", "KZ"]),
+        (39, "+390669821234", &["IT", "VA"]),
+        (44, "+442079460958", &["GB", "GG", "IM", "JE"]),
+        (47, "+4791234567", &["NO", "SJ"]),
+        (61, "+61412345678", &["AU", "CC", "CX"]),
+        (212, "+212612345678", &["MA", "EH"]),
+        (262, "+262692691234", &["RE", "YT"]),
+        (358, "+358401234567", &["FI", "AX"]),
+        (500, "+50051234", &["FK", "GS"]),
+        (590, "+590590123456", &["GP", "BL", "MF"]),
+        (599, "+59995181234", &["CW", "BQ"]),
     ];
 
     #[test]
-    fn test_is_valid_phone_number() {
-        // Valid phone number
-        assert!(is_valid_phone_number("+96179123123"));
-        assert!(is_valid_phone_number("12025550173"));
-        assert!(is_valid_phone_number("+1.202.555.0173"));
-        assert!(is_valid_phone_number("+1 (202) 555-0173 ext. 99"));
-        assert!(is_valid_phone_number("1-800-FLOWERS"));
-        assert!(!is_valid_phone_number("invalid_phone_number"));
-        // Valid phone number with parentheses
-        assert!(is_valid_phone_number("+1 (234) 567-8990"));
-        assert!(!is_valid_phone_number("+1 (234) 567-890"));
-        assert!(!is_valid_phone_number("1+2025550173"));
-        assert!(!is_valid_phone_number("+1 (234 567-8990"));
-    }
-
-    #[test]
-    fn test_normalize_phone_number_in_place() {
-        // Valid phone number
-        assert_eq!(
-            normalize_phone_number_in_place(&mut "+12345678912".to_string()),
-            Some("+12345678912".to_string())
-        );
-        // Invalid characters
-        assert_eq!(
-            normalize_phone_number_in_place(&mut "invalid_phone_number".to_string()),
-            None
-        );
-        // // Valid phone number with leading zeros
-        assert_eq!(
-            normalize_phone_number_in_place(&mut "+0012345678912".to_string()),
-            Some("+12345678912".to_string())
-        );
-        assert_eq!(
-            normalize_phone_number_in_place(&mut "+96109123123".to_string()),
-            Some("+9619123123".to_string())
-        );
-        // // Valid phone number with country code and leading zeros
-        assert_eq!(
-            normalize_phone_number_in_place(&mut "+0012345678901".to_string()),
-            Some("+12345678901".to_string())
-        );
-        // // Valid phone number with parentheses and spaces
-        assert_eq!(
-            normalize_phone_number_in_place(&mut "+1 (234) 567-8910".to_string()),
-            Some("+12345678910".to_string())
-        );
-        assert_eq!(
-            normalize_phone_number_in_place(&mut "+1 (202) 555-0173 ext. 99".to_string()),
-            Some("+12025550173".to_string())
-        );
-        assert_eq!(
-            normalize_phone_number_in_place(&mut "1-800-FLOWERS".to_string()),
-            Some("+18003569377".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_country() {
-        // Valid country code
-        assert_eq!(
-            extract_country("+11231231232").unwrap().code.to_string(),
-            "US".to_string()
-        );
-        // Invalid country code
-        assert_eq!(extract_country("+987654321"), None);
-        assert_eq!(
-            extract_country("1-800-FLOWERS").map(|country| country.code),
-            Some("US")
-        );
-    }
-
-    #[test]
-    fn test_extract_country_nanp_four_digit_prefixes() {
-        // NANP territories use a 4-digit dialing prefix (country code 1 + a
-        // 3-digit area code). They must resolve to their own country rather
-        // than collapsing into US, which shares the bare "1" prefix.
-        let cases = [
-            ("+12684641234", "AG"), // Antigua and Barbuda
-            ("+12642351234", "AI"), // Anguilla
-            ("+16842351234", "AS"), // American Samoa
-            ("+12462311234", "BB"), // Barbados
-            ("+14412341234", "BM"), // Bermuda
-            ("+12425571234", "BS"), // Bahamas
-            ("+17672351234", "DM"), // Dominica
-            ("+18092351234", "DO"), // Dominican Republic
-            ("+14732341234", "GD"), // Grenada
-            ("+16712351234", "GU"), // Guam
-            ("+18762351234", "JM"), // Jamaica
-            ("+18692351234", "KN"), // Saint Kitts and Nevis
-            ("+13453211234", "KY"), // Cayman Islands
-            ("+17582841234", "LC"), // Saint Lucia
-            ("+16702351234", "MP"), // Northern Mariana Islands
-            ("+16642351234", "MS"), // Montserrat
-            ("+17215431234", "SX"), // Sint Maarten
-            ("+16492311234", "TC"), // Turks and Caicos Islands
-            ("+18682351234", "TT"), // Trinidad and Tobago
-            ("+17842351234", "VC"), // Saint Vincent and the Grenadines
-            ("+12844681234", "VG"), // British Virgin Islands
-            ("+13406901234", "VI"), // U.S. Virgin Islands
-        ];
-
-        for (number, expected) in cases {
+    fn countries_by_calling_code_puts_the_primary_first() {
+        for &(calling_code, sample, expected) in SHARED_CALLING_CODES {
+            let entries: Vec<&str> = countries_by_calling_code(calling_code)
+                .iter()
+                .map(|c| c.code)
+                .collect();
             assert_eq!(
-                extract_country(number).map(|c| c.code),
-                Some(expected),
-                "{number} should resolve to {expected}"
+                entries, expected,
+                "+{calling_code} must list exactly {expected:?}, primary first"
             );
-            // The full 4-digit prefix is stripped, leaving a 7-digit national number.
-            let parsed = crate::PhoneNumber::parse(number).unwrap();
+            // The same winner has to come out of the single-answer APIs.
+            assert_eq!(
+                extract_country(sample).map(|c| c.code),
+                Some(expected[0]),
+                "{sample} must resolve to {}",
+                expected[0]
+            );
+            assert_eq!(
+                extract_countries(sample).first().map(|c| c.code),
+                Some(expected[0]),
+                "{sample}: the primary must come first"
+            );
+        }
+        assert!(countries_by_calling_code(9999).is_empty());
+    }
+
+    /// Every calling code claimed by more than one entry must have a pinned
+    /// primary above. A new shared code added to the table without a decision
+    /// about who owns it would otherwise be resolved by declaration order.
+    #[test]
+    fn every_shared_calling_code_has_a_designated_primary() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut by_prefix: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+        for country in countries() {
+            by_prefix
+                .entry(country.prefix)
+                .or_default()
+                .push(country.code);
+        }
+
+        let pinned: BTreeSet<u32> = SHARED_CALLING_CODES.iter().map(|&(p, _, _)| p).collect();
+        let shared: BTreeSet<u32> = by_prefix
+            .iter()
+            .filter(|(_, codes)| codes.len() > 1)
+            .map(|(&prefix, _)| prefix)
+            .collect();
+        assert_eq!(
+            shared, pinned,
+            "the set of shared calling codes changed; decide who owns the new one"
+        );
+    }
+
+    #[test]
+    fn recently_added_entries_are_present() {
+        assert_eq!(country_by_code("XK").map(|c| c.prefix), Some(383), "Kosovo");
+        assert_eq!(
+            country_by_code("BQ").map(|c| c.prefix),
+            Some(599),
+            "Caribbean Netherlands"
+        );
+        assert_eq!(iso("+38344123456"), "XK");
+        assert_eq!(iso("+5997001234"), "BQ");
+    }
+
+    #[test]
+    fn country_display_is_human_readable() {
+        assert_eq!(country_by_code("JP").unwrap().to_string(), "Japan (+81)");
+    }
+
+    #[test]
+    fn every_country_referenced_by_the_fixture_is_in_the_table() {
+        for &(code, _) in COUNTRY_FIXTURE {
+            assert!(
+                country_by_code(code).is_some(),
+                "fixture references unknown country {code}"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Formatting
+// ============================================================================
+
+mod formatting {
+    use super::*;
+
+    /// `(E.164 input, E164, International, National, RFC3966)`.
+    const FORMAT_CASES: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "+12025550173",
+            "+12025550173",
+            "+1 202 555 0173",
+            "(202) 555-0173",
+            "tel:+12025550173",
+        ),
+        (
+            "+12685550173",
+            "+12685550173",
+            "+1 268 555 0173",
+            "(268) 555-0173",
+            "tel:+12685550173",
+        ),
+        (
+            "+442079460958",
+            "+442079460958",
+            "+44 20 7946 0958",
+            "020 7946 0958",
+            "tel:+442079460958",
+        ),
+        (
+            "+390669821234",
+            "+390669821234",
+            "+39 06 6982 1234",
+            "06 6982 1234",
+            "tel:+390669821234",
+        ),
+        (
+            "+33142685300",
+            "+33142685300",
+            "+33 1 42 68 53 00",
+            "01 42 68 53 00",
+            "tel:+33142685300",
+        ),
+        (
+            "+493012345678",
+            "+493012345678",
+            "+49 30 1234 5678",
+            "030 1234 5678",
+            "tel:+493012345678",
+        ),
+        (
+            "+819012345678",
+            "+819012345678",
+            "+81 90 1234 5678",
+            "090 1234 5678",
+            "tel:+819012345678",
+        ),
+    ];
+
+    #[test]
+    fn formats_match_the_expected_shape() {
+        for &(input, e164, international, national, rfc3966) in FORMAT_CASES {
+            assert_eq!(
+                format_phone_number(input, PhoneFormat::E164).as_deref(),
+                Some(e164),
+                "E164 of {input}"
+            );
+            assert_eq!(
+                format_phone_number(input, PhoneFormat::International).as_deref(),
+                Some(international),
+                "International of {input}"
+            );
+            assert_eq!(
+                format_phone_number(input, PhoneFormat::National).as_deref(),
+                Some(national),
+                "National of {input}"
+            );
+            assert_eq!(
+                format_phone_number(input, PhoneFormat::RFC3966).as_deref(),
+                Some(rfc3966),
+                "RFC3966 of {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn national_format_carries_the_trunk_prefix() {
+        // The trunk prefix is what makes the output dialable domestically and
+        // what lets `parse_with_country` recover the original number.
+        for (input, national, trunk) in [
+            ("+442079460958", "020 7946 0958", "0"),
+            ("+493012345678", "030 1234 5678", "0"),
+            ("+61412345678", "04 1234 5678", "0"),
+            // Russia writes the trunk `8` as its own token; gluing it produces
+            // "8916 …", which reads as a four-digit area code.
+            ("+79161234567", "8 916 123 45 67", "8"),
+        ] {
+            let formatted = format_phone_number(input, PhoneFormat::National).unwrap();
+            assert_eq!(formatted, national, "National of {input}");
+            assert!(
+                formatted.starts_with(trunk),
+                "{formatted} must start with the trunk prefix"
+            );
+        }
+        // Italy has no trunk prefix; its leading zero is part of the number.
+        assert_eq!(
+            format_phone_number("+390669821234", PhoneFormat::National).as_deref(),
+            Some("06 6982 1234")
+        );
+    }
+
+    /// `(E.164, national significant length, National, International)`.
+    ///
+    /// Every row belongs to a country with **no** entry in
+    /// `national_group_sizes`, so the grouping comes from `default_group_sizes`
+    /// alone. One row per length that table handles and the number plan can
+    /// actually produce, plus the two short lengths it deliberately does not
+    /// group. These pin the *default table*, not any local writing convention.
+    const DEFAULT_GROUPING_CASES: &[(&str, usize, &str, &str)] = &[
+        // Below 6 digits there is no rule, so the number is emitted ungrouped.
+        ("+3527599", 4, "7599", "+352 7599"),    // Luxembourg
+        ("+24778694", 5, "78694", "+247 78694"), // Ascension
+        ("+376312345", 6, "312 345", "+376 312 345"), // Andorra, [3, 3]
+        ("+3544101234", 7, "410 1234", "+354 410 1234"), // Iceland, [3, 4]
+        ("+35679012345", 8, "7901 2345", "+356 7901 2345"), // Malta, [4, 4]
+        ("+34912345678", 9, "912 345 678", "+34 912 345 678"), // Spain, [3, 3, 3]
+        ("+541143214321", 10, "114 321 4321", "+54 114 321 4321"), // Argentina, [3, 3, 4]
+        (
+            "+5491143214321",
+            11,
+            "911 4321 4321",
+            "+54 911 4321 4321", // Argentina, [3, 4, 4]
+        ),
+        (
+            "+43783700628291",
+            12,
+            "0783 700 628 291", // Austria, [3, 3, 3, 3] behind the trunk `0`
+            "+43 783 700 628 291",
+        ),
+        (
+            "+438214630396663",
+            13,
+            "0821 463 039 6663", // Austria, [3, 3, 3, 4]
+            "+43 821 463 039 6663",
+        ),
+    ];
+
+    #[test]
+    fn default_grouping_is_pinned_for_every_reachable_length() {
+        for &(number, national_len, national, international) in DEFAULT_GROUPING_CASES {
+            let parsed = PhoneNumber::parse(number)
+                .unwrap_or_else(|| panic!("{number} must be a valid number"));
             assert_eq!(
                 parsed.national_number().len(),
-                7,
-                "national length for {number}"
+                national_len,
+                "{number} does not have {national_len} national digits"
             );
-            // Normalization stays idempotent.
-            assert_eq!(normalize_phone_number(number), Some(number.to_string()));
+            assert_eq!(
+                format_phone_number(number, PhoneFormat::National).as_deref(),
+                Some(national),
+                "National of {number}"
+            );
+            assert_eq!(
+                format_phone_number(number, PhoneFormat::International).as_deref(),
+                Some(international),
+                "International of {number}"
+            );
         }
+    }
 
-        // Genuine US/Canada numbers (bare "1" prefix) must not be captured by a
-        // 4-digit NANP entry.
-        assert_eq!(extract_country("+12025550173").map(|c| c.code), Some("US"));
-        assert_eq!(extract_country("+14165551234").map(|c| c.code), Some("US"));
+    /// `default_group_sizes` also has 14- and 15-digit arms. No country in the
+    /// table accepts a national significant number that long, so they are
+    /// unreachable — which is why the table above stops at 13.
+    #[test]
+    fn no_numbering_plan_reaches_the_longest_default_grouping_arms() {
+        let longest = countries()
+            .iter()
+            .flat_map(|c| c.phone_lengths.iter().copied())
+            .max()
+            .expect("the country table is not empty");
+        assert_eq!(
+            longest, 13,
+            "a plan now accepts {longest} national digits; extend DEFAULT_GROUPING_CASES"
+        );
     }
 
     #[test]
-    fn test_extract_country_nanp_overlay_area_codes() {
-        // Regions served by several area codes must resolve correctly from any
-        // of them, not just the primary one.
-        let cases = [
-            ("+18092351234", "DO"), // Dominican Republic (809, primary)
-            ("+18292351234", "DO"), // Dominican Republic (829 overlay)
-            ("+18492351234", "DO"), // Dominican Republic (849 overlay)
-            ("+17872351234", "PR"), // Puerto Rico (787, primary)
-            ("+19392351234", "PR"), // Puerto Rico (939 overlay)
+    fn rfc3966_output_re_parses() {
+        for &(_, number) in COUNTRY_FIXTURE {
+            let uri = format_phone_number(number, PhoneFormat::RFC3966).unwrap();
+            assert!(uri.starts_with("tel:+"), "{uri} is not a tel: URI");
+            assert!(
+                is_valid_phone_number(&uri),
+                "the crate must accept its own RFC 3966 output {uri}"
+            );
+            assert_eq!(
+                normalize_phone_number(&uri).as_deref(),
+                Some(number),
+                "{uri} must re-parse to {number}"
+            );
+        }
+    }
+
+    #[test]
+    fn rfc3966_output_carries_the_extension_and_re_parses_with_it() {
+        let parsed = PhoneNumber::parse("+1 202-555-0173 ext. 42").unwrap();
+        let uri = parsed.format(PhoneFormat::RFC3966);
+        assert_eq!(uri, "tel:+12025550173;ext=42");
+
+        let back = PhoneNumber::parse(&uri).unwrap();
+        assert_eq!(back.e164(), "+12025550173");
+        assert_eq!(back.extension(), Some("42"));
+    }
+
+    #[test]
+    fn formatting_an_invalid_number_returns_none() {
+        for format in [
+            PhoneFormat::E164,
+            PhoneFormat::International,
+            PhoneFormat::National,
+            PhoneFormat::RFC3966,
+        ] {
+            assert_eq!(format_phone_number("nonsense", format), None);
+            assert_eq!(format_phone_number("", format), None);
+            assert_eq!(format_phone_number("+11111111111", format), None);
+        }
+    }
+
+    #[test]
+    fn phone_format_variants_are_distinct() {
+        // `#[non_exhaustive]` only forces a wildcard arm outside the defining
+        // crate, so that half of the contract is proved from `tests/`; here we
+        // pin that the four variants exist and compare by value.
+        let described = |format: PhoneFormat| match format {
+            PhoneFormat::E164 => "e164",
+            PhoneFormat::International => "international",
+            PhoneFormat::National => "national",
+            PhoneFormat::RFC3966 => "rfc3966",
+        };
+        assert_eq!(described(PhoneFormat::E164), "e164");
+        assert_eq!(described(PhoneFormat::RFC3966), "rfc3966");
+        assert_eq!(PhoneFormat::E164, PhoneFormat::E164);
+        assert_ne!(PhoneFormat::E164, PhoneFormat::National);
+    }
+}
+
+// ============================================================================
+// Type classification
+// ============================================================================
+
+mod classification {
+    use super::*;
+    use PhoneNumberType::*;
+
+    const TYPE_CASES: &[(&str, PhoneNumberType)] = &[
+        // United Kingdom.
+        ("+448001234567", TollFree),
+        ("+448081234567", TollFree),
+        ("+448451234567", SharedCost),
+        ("+449091234567", PremiumRate),
+        ("+443001234567", Uan),
+        ("+445612345678", Voip),
+        ("+447911123456", Mobile),
+        ("+442079460958", FixedLine),
+        ("+447000123456", PersonalNumber),
+        ("+447600123456", Pager),
+        // Germany.
+        ("+498001234567", TollFree),
+        ("+499001234567", PremiumRate),
+        ("+491801234567", SharedCost),
+        ("+497001234567", PersonalNumber),
+        ("+491641234567", Pager),
+        ("+491701234567", Mobile),
+        ("+493012345678", FixedLine),
+        // France.
+        ("+33612345678", Mobile),
+        ("+33912345678", Voip),
+        ("+33142685300", FixedLine),
+        ("+33810123456", SharedCost),
+        ("+33891123456", PremiumRate),
+        // Italy — the leading zero is part of the number.
+        ("+390669821234", FixedLine),
+        ("+393331234567", Mobile),
+        ("+398001234567", TollFree),
+        // North America: geographic ranges are not split by service.
+        ("+12025550173", FixedLineOrMobile),
+        ("+14165550198", FixedLineOrMobile),
+        ("+12685550173", FixedLineOrMobile),
+        ("+18005550199", TollFree),
+        ("+18885550199", TollFree),
+        ("+19005550199", PremiumRate),
+        ("+15005550199", PersonalNumber),
+        ("+17005550199", Uan),
+        // Elsewhere.
+        ("+8613800138000", Mobile),
+        ("+862112345678", FixedLine),
+        ("+5511987654321", Mobile),
+        ("+551133334444", FixedLine),
+        ("+919876543210", Mobile),
+        ("+911123456789", FixedLine),
+        ("+81120123456", TollFree),
+        ("+819012345678", Mobile),
+        ("+81312345678", FixedLine),
+        ("+34612345678", Mobile),
+        ("+34912345678", FixedLine),
+        ("+27821234567", Mobile),
+        ("+61412345678", Mobile),
+        ("+611800123456", TollFree),
+        ("+611300123456", SharedCost),
+        ("+611900123456", PremiumRate),
+        ("+79161234567", Mobile),
+        ("+74951234567", FixedLine),
+        ("+905321234567", Mobile),
+        ("+353861234567", Mobile),
+        ("+35312345678", FixedLine),
+        // No range table: an honest Unknown rather than a first-digit guess.
+        ("+96179123123", Unknown),
+    ];
+
+    #[test]
+    fn type_table() {
+        for &(number, expected) in TYPE_CASES {
+            assert_eq!(
+                detect_phone_number_type(number),
+                Some(expected),
+                "detect_phone_number_type({number})"
+            );
+        }
+    }
+
+    #[test]
+    fn detection_returns_none_for_invalid_numbers() {
+        assert_eq!(detect_phone_number_type("nonsense"), None);
+        assert_eq!(detect_phone_number_type(""), None);
+        assert_eq!(detect_phone_number_type("+11111111111"), None);
+    }
+
+    #[test]
+    fn helper_predicates_agree_with_detection() {
+        for &(number, expected) in TYPE_CASES {
+            assert_eq!(
+                is_mobile_number(number),
+                expected == Mobile,
+                "is_mobile_number({number})"
+            );
+            assert_eq!(
+                is_landline_number(number),
+                expected == FixedLine,
+                "is_landline_number({number})"
+            );
+            assert_eq!(
+                is_toll_free_number(number),
+                expected == TollFree,
+                "is_toll_free_number({number})"
+            );
+        }
+        // Invalid input is never any of them.
+        assert!(!is_mobile_number("nonsense"));
+        assert!(!is_landline_number("nonsense"));
+        assert!(!is_toll_free_number("nonsense"));
+    }
+
+    #[test]
+    fn north_american_numbers_are_not_claimed_to_be_landlines() {
+        // Number portability decoupled the prefix from the technology, so a
+        // NANP geographic number is FixedLineOrMobile and neither predicate
+        // may claim it.
+        assert!(!is_landline_number("+12025550173"));
+        assert!(!is_mobile_number("+12025550173"));
+        assert_eq!(
+            detect_phone_number_type("+12025550173"),
+            Some(FixedLineOrMobile)
+        );
+    }
+
+    #[test]
+    fn every_phone_number_type_variant_is_reachable() {
+        use std::collections::BTreeSet;
+
+        let reachable: BTreeSet<String> =
+            TYPE_CASES.iter().map(|&(_, t)| format!("{t:?}")).collect();
+        for variant in [
+            "Mobile",
+            "FixedLine",
+            "FixedLineOrMobile",
+            "TollFree",
+            "PremiumRate",
+            "SharedCost",
+            "Voip",
+            "PersonalNumber",
+            "Pager",
+            "Uan",
+            "Unknown",
+        ] {
+            assert!(
+                reachable.contains(variant),
+                "PhoneNumberType::{variant} is unreachable dead API"
+            );
+        }
+    }
+
+    #[test]
+    fn phone_number_type_is_non_exhaustive_and_displays() {
+        let describe = |t: PhoneNumberType| match t {
+            Mobile => "m",
+            FixedLine => "f",
+            _ => "other",
+        };
+        assert_eq!(describe(Mobile), "m");
+        assert_eq!(describe(TollFree), "other");
+
+        assert_eq!(Mobile.to_string(), "mobile");
+        assert_eq!(FixedLineOrMobile.to_string(), "fixed line or mobile");
+        assert_eq!(Unknown.to_string(), "unknown");
+    }
+}
+
+// ============================================================================
+// Generation
+// ============================================================================
+
+mod generation {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn generated_numbers_round_trip_for_every_country_that_can_be_generated() {
+        for country in countries() {
+            let Some(number) = generate_random_phone_number(country.code) else {
+                continue;
+            };
+            assert!(
+                is_valid_phone_number(&number),
+                "{} generated an invalid number {number}",
+                country.code
+            );
+            assert_eq!(
+                normalize_phone_number(&number).as_deref(),
+                Some(number.as_str()),
+                "{} generated a non-canonical number {number}",
+                country.code
+            );
+            assert_eq!(
+                extract_country(&number).map(|c| c.code),
+                Some(country.code),
+                "{} generated {number}, which resolves elsewhere",
+                country.code
+            );
+        }
+    }
+
+    /// The exact set of countries that cannot be generated.
+    ///
+    /// Every one of them shares a calling code with an entry whose accepted
+    /// lengths cover its own, so no number can be minted that resolves back to
+    /// it. A country *leaving* this set is a fix; a country *joining* it is a
+    /// resolution regression, and either way the list in the crate docs has to
+    /// be updated — so the set is pinned exactly rather than bounded.
+    const UNGENERATABLE: &[&str] = &[
+        "AX", "BL", "CC", "CX", "EH", "GG", "GS", "IM", "JE", "KZ", "MF", "SJ", "VA", "YT",
+    ];
+
+    #[test]
+    fn generation_returns_none_exactly_for_the_shadowed_countries() {
+        let ungeneratable: BTreeSet<&str> = countries()
+            .iter()
+            .filter(|c| generate_random_phone_number(c.code).is_none())
+            .map(|c| c.code)
+            .collect();
+
+        assert_eq!(
+            ungeneratable,
+            UNGENERATABLE.iter().copied().collect::<BTreeSet<_>>()
+        );
+
+        // Every one of them really is shadowed: another entry on the same
+        // calling code is the designated primary.
+        for &code in UNGENERATABLE {
+            let country =
+                country_by_code(code).unwrap_or_else(|| panic!("{code} is not a country"));
+            assert!(
+                countries_by_calling_code(country.prefix).len() > 1,
+                "{code} cannot be generated but has +{} to itself",
+                country.prefix
+            );
+            assert_ne!(
+                countries_by_calling_code(country.prefix)[0].code,
+                code,
+                "{code} is the primary for +{} and must be generatable",
+                country.prefix
+            );
+        }
+
+        // Everything with an unambiguous plan must be generatable.
+        for expected in [
+            "US", "CA", "GB", "DE", "FR", "IT", "JP", "AU", "BR", "IN", "AG", "DO",
+        ] {
+            assert!(
+                !ungeneratable.contains(expected),
+                "{expected} must be generatable"
+            );
+        }
+    }
+
+    #[test]
+    fn nanp_generation_draws_from_the_countrys_own_area_codes() {
+        let numbers = generate_random_phone_numbers("CA", 200);
+        assert_eq!(numbers.len(), 200);
+        for number in &numbers {
+            assert_eq!(
+                extract_country(number).map(|c| c.code),
+                Some("CA"),
+                "{number} was generated for CA but resolves elsewhere"
+            );
+        }
+
+        let us = generate_random_phone_numbers("US", 300);
+        assert_eq!(us.len(), 300);
+        for number in &us {
+            assert_eq!(
+                extract_country(number).map(|c| c.code),
+                Some("US"),
+                "{number}"
+            );
+            // Area codes start 2-9; a clamped rather than resampled leading
+            // digit used to produce impossible 0/1 area codes.
+            let area_first = number.as_bytes()[2];
+            assert!(
+                (b'2'..=b'9').contains(&area_first),
+                "{number} has an impossible area code"
+            );
+        }
+    }
+
+    #[test]
+    fn generation_samples_the_whole_length_range() {
+        let austria = country_by_code("AT").unwrap();
+        assert!(
+            austria.phone_lengths.len() > 3,
+            "this test needs a country with several accepted lengths"
+        );
+
+        let lengths: BTreeSet<usize> = generate_random_phone_numbers("AT", 400)
+            .iter()
+            .map(|n| n.len())
+            .collect();
+        assert!(
+            lengths.len() >= 3,
+            "generation always used the same length: {lengths:?}"
+        );
+    }
+
+    #[test]
+    fn generation_is_not_periodic() {
+        // A generator that takes its digits from a single bit range repeats
+        // with a short period; 300 draws from a healthy one collide rarely.
+        let numbers = generate_random_phone_numbers("US", 300);
+        let unique: BTreeSet<&String> = numbers.iter().collect();
+        assert!(
+            unique.len() >= 295,
+            "only {} of 300 generated numbers were unique",
+            unique.len()
+        );
+
+        let mut histogram = [0usize; 10];
+        for number in &numbers {
+            for byte in &number.as_bytes()[2..] {
+                histogram[(byte - b'0') as usize] += 1;
+            }
+        }
+        let total: usize = histogram.iter().sum();
+        for (digit, &count) in histogram.iter().enumerate() {
+            assert!(
+                count * 10 > total / 3,
+                "digit {digit} appears {count} times out of {total}; the distribution is skewed"
+            );
+        }
+    }
+
+    #[test]
+    fn generation_rejects_an_unknown_country() {
+        assert_eq!(generate_random_phone_number("ZZ"), None);
+        assert_eq!(generate_random_phone_number(""), None);
+        assert!(generate_random_phone_numbers("ZZ", 10).is_empty());
+        // A caller-controlled count must not be used as an allocation hint.
+        assert!(generate_random_phone_numbers("ZZ", usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn batch_generation_returns_the_requested_count() {
+        assert_eq!(generate_random_phone_numbers("US", 5).len(), 5);
+        assert_eq!(generate_random_phone_numbers("US", 0).len(), 0);
+        assert!(generate_random_phone_numbers("US", 5)
+            .iter()
+            .all(|n| is_valid_phone_number(n)));
+    }
+}
+
+// ============================================================================
+// Comparison and grouping
+// ============================================================================
+
+mod comparison {
+    use super::*;
+
+    #[test]
+    fn equality_ignores_formatting() {
+        assert!(are_phone_numbers_equal(
+            "+1 202-555-0173",
+            "+1 (202) 555-0173"
+        ));
+        assert!(are_phone_numbers_equal("+12025550173", "tel:+12025550173"));
+        assert!(are_phone_numbers_equal(
+            "+442079460958",
+            "+44 (0)20 7946 0958"
+        ));
+    }
+
+    #[test]
+    fn different_numbers_are_not_equal() {
+        assert!(!are_phone_numbers_equal("+12025550173", "+12025550174"));
+        assert!(!are_phone_numbers_equal("+12025550173", "+442079460958"));
+        // A significant leading zero makes a genuinely different number.
+        assert!(!are_phone_numbers_equal("+390698123456", "+39698123456"));
+    }
+
+    #[test]
+    fn invalid_numbers_are_never_equal_even_to_themselves() {
+        assert!(!are_phone_numbers_equal("nonsense", "nonsense"));
+        assert!(!are_phone_numbers_equal("", ""));
+        assert!(!are_phone_numbers_equal("+12025550173", "nonsense"));
+    }
+
+    #[test]
+    fn grouping_collects_equivalent_spellings() {
+        let numbers = ["+1 202-555-0173", "+1 (202) 555-0173", "+442079460958"];
+        let groups = group_equivalent_phone_numbers(&numbers);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0], ["+1 202-555-0173", "+1 (202) 555-0173"]);
+        assert_eq!(groups[1], ["+442079460958"]);
+    }
+
+    #[test]
+    fn grouping_preserves_every_input_exactly_once() {
+        let numbers = [
+            "+12025550173",
+            "not a number",
+            "not a number",
+            "+1 202 555 0173",
+            "",
+        ];
+        let groups = group_equivalent_phone_numbers(&numbers);
+        let flattened: Vec<&String> = groups.iter().flatten().collect();
+        assert_eq!(flattened.len(), numbers.len());
+        for input in numbers {
+            assert!(
+                flattened.iter().any(|s| s.as_str() == input),
+                "{input:?} was dropped"
+            );
+        }
+        // Unnormalizable inputs each form their own group.
+        assert_eq!(groups.len(), 4);
+    }
+
+    #[test]
+    fn grouping_an_empty_slice_yields_no_groups() {
+        let empty: [&str; 0] = [];
+        assert!(group_equivalent_phone_numbers(&empty).is_empty());
+    }
+}
+
+// ============================================================================
+// Batch APIs
+// ============================================================================
+
+mod batch {
+    use super::*;
+
+    #[test]
+    fn validate_batch() {
+        assert_eq!(
+            validate_phone_numbers_batch(&["+12025550173", "invalid", "+442079460958"]),
+            vec![true, false, true]
+        );
+        assert!(validate_phone_numbers_batch::<&str>(&[]).is_empty());
+    }
+
+    #[test]
+    fn normalize_batch() {
+        assert_eq!(
+            normalize_phone_numbers_batch(&["+12025550173", "+1 (202) 555-0173", "nonsense"]),
+            vec![
+                Some("+12025550173".to_string()),
+                Some("+12025550173".to_string()),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_countries_batch_matches_the_scalar_function() {
+        let out = extract_countries_batch(&["+12025550173", "+442079460958", "nonsense"]);
+        assert_eq!(out[0].map(|c| c.code), Some("US"));
+        assert_eq!(out[1].map(|c| c.code), Some("GB"));
+        assert_eq!(out[2].map(|c| c.code), None);
+    }
+
+    #[test]
+    fn detect_types_batch_matches_the_scalar_function() {
+        let out = detect_phone_number_types_batch(&["+18005550199", "+447911123456", "nonsense"]);
+        assert_eq!(out[0], Some(PhoneNumberType::TollFree));
+        assert_eq!(out[1], Some(PhoneNumberType::Mobile));
+        assert_eq!(out[2], None);
+    }
+
+    #[test]
+    fn analysis_reports_every_field() {
+        let out = analyze_phone_numbers_batch(&["+1 (202) 555-0173"]);
+        assert_eq!(out.len(), 1);
+        let analysis = &out[0];
+        assert_eq!(analysis.original, "+1 (202) 555-0173");
+        assert!(analysis.is_valid);
+        assert_eq!(analysis.normalized.as_deref(), Some("+12025550173"));
+        assert_eq!(analysis.country.map(|c| c.code), Some("US"));
+        assert_eq!(
+            analysis.phone_type,
+            Some(PhoneNumberType::FixedLineOrMobile)
+        );
+        assert_eq!(analysis.error, None);
+    }
+
+    #[test]
+    fn analysis_reports_the_rejection_reason() {
+        for (input, expected) in [
+            ("nonsense", ParseError::InvalidCharacter),
+            ("+11111111111", ParseError::InvalidAreaCode),
+            ("+12021110173", ParseError::InvalidExchange),
+            ("+1202555", ParseError::InvalidLength),
+            ("", ParseError::Empty),
+        ] {
+            let analysis = &analyze_phone_numbers_batch(&[input])[0];
+            assert!(!analysis.is_valid, "{input:?}");
+            assert_eq!(analysis.normalized, None);
+            assert_eq!(analysis.country, None);
+            assert_eq!(analysis.phone_type, None);
+            assert_eq!(analysis.error, Some(expected), "error for {input:?}");
+        }
+    }
+
+    #[test]
+    fn analysis_never_contradicts_the_other_batch_apis() {
+        let corpus: Vec<&str> = VALIDATION_CASES
+            .iter()
+            .map(|&(s, _)| s)
+            .chain(INVALID_CASES.iter().map(|&(s, _)| s))
+            .chain(COUNTRY_FIXTURE.iter().map(|&(_, s)| s))
+            .collect();
+
+        let analyses = analyze_phone_numbers_batch(&corpus);
+        let validity = validate_phone_numbers_batch(&corpus);
+        let normalized = normalize_phone_numbers_batch(&corpus);
+        let resolved = extract_countries_batch(&corpus);
+        let types = detect_phone_number_types_batch(&corpus);
+
+        for (index, input) in corpus.iter().enumerate() {
+            assert_eq!(
+                analyses[index].is_valid, validity[index],
+                "analyze and validate disagree on {input:?}"
+            );
+            assert_eq!(
+                analyses[index].normalized, normalized[index],
+                "analyze and normalize disagree on {input:?}"
+            );
+            assert_eq!(
+                analyses[index].country.map(|c| c.code),
+                resolved[index].map(|c| c.code),
+                "analyze and extract_country disagree on {input:?}"
+            );
+            assert_eq!(
+                analyses[index].phone_type, types[index],
+                "analyze and detect_type disagree on {input:?}"
+            );
+            assert_eq!(analyses[index].original, *input);
+        }
+    }
+
+    #[test]
+    fn batches_accept_owned_strings_too() {
+        let owned = vec!["+12025550173".to_string(), "nonsense".to_string()];
+        assert_eq!(validate_phone_numbers_batch(&owned), vec![true, false]);
+    }
+}
+
+// ============================================================================
+// Correction suggestions
+// ============================================================================
+
+mod suggestions {
+    use super::*;
+
+    #[test]
+    fn an_already_valid_number_is_returned_unchanged() {
+        assert_eq!(
+            suggest_phone_number_corrections("+12025550173", None),
+            vec!["+12025550173".to_string()]
+        );
+        assert_eq!(
+            suggest_phone_number_corrections("  +1 (202) 555-0173  ", None),
+            vec!["+12025550173".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_idd_prefix_is_repaired_into_a_plus() {
+        assert_eq!(
+            suggest_phone_number_corrections("00442079460958", None),
+            vec!["+442079460958".to_string()]
+        );
+        assert_eq!(
+            suggest_phone_number_corrections("011442079460958", None),
+            vec!["+442079460958".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_national_number_is_repaired_against_the_hint() {
+        assert_eq!(
+            suggest_phone_number_corrections("07911 123456", Some("GB")),
+            vec!["+447911123456".to_string()]
+        );
+    }
+
+    /// `(input, hint, the exact suggestions, in order)`.
+    ///
+    /// Asserting the exact vector rather than "non-empty and all valid" is the
+    /// point: the loose form let the two `Some("US")` rows come back with five
+    /// numbers from five unrelated countries and nobody noticed. That defect is
+    /// fixed — every hinted row below is now entirely in the hinted country —
+    /// and [`suggestions_for_a_hinted_input_reach_the_hint_country`] pins the
+    /// property so it cannot come back.
+    const SUGGESTION_CASES: &[(&str, Option<&str>, &[&str])] = &[
+        // Already valid: returned unchanged, and nothing else is offered.
+        ("+12025550173", None, &["+12025550173"]),
+        // The hint reading wins over whatever the bare digits spell.
+        ("2025550173", Some("US"), &["+12025550173"]),
+        ("020 7946 0958", Some("GB"), &["+442079460958"]),
+        ("07911 123456", Some("GB"), &["+447911123456"]),
+        // An IDD prefix instead of '+'.
+        ("00442079460958", None, &["+442079460958"]),
+        // One digit too many: single deletions, from the end backwards, so the
+        // obvious repair — drop the trailing digit — is offered first. Every
+        // suggestion stays in the hinted country; the global reading of the
+        // same digits is only offered when no hinted repair exists at all.
+        (
+            "+1 202 555 01730",
+            Some("US"),
+            &[
+                "+12025550173",
+                "+12025550170",
+                "+12025550130",
+                "+12025550730",
+                "+12025551730",
+            ],
+        ),
+        (
+            "+44 20 7946 09580",
+            Some("GB"),
+            &[
+                "+442079460958",
+                "+442079460950",
+                "+442079460980",
+                "+442079460580",
+                "+442079469580",
+            ],
+        ),
+        // One digit missing. Insertions are tried from the end backwards,
+        // because a truncated number lost its last digit, so the ten
+        // end-insertions come first — and the real number is among them.
+        (
+            "+1 202 555 017",
+            Some("US"),
+            &[
+                "+12025550170",
+                "+12025550171",
+                "+12025550172",
+                "+12025550173",
+                "+12025550174",
+            ],
+        ),
+        // No hint: the candidate countries are tried in their documented order,
+        // and the list is cut at five.
+        (
+            "07911123456",
+            None,
+            &[
+                "+447911123456",
+                "+497911123456",
+                "+917911123456",
+                "+617911123456",
+                "+557911123456",
+            ],
+        ),
+    ];
+
+    #[test]
+    fn every_suggestion_is_a_valid_number_and_there_are_at_most_five() {
+        for &(input, hint, expected) in SUGGESTION_CASES {
+            let suggestions = suggest_phone_number_corrections(input, hint);
+            assert_eq!(
+                suggestions, expected,
+                "suggestions for {input:?} with hint {hint:?}"
+            );
+            assert!(
+                suggestions.len() <= 5,
+                "{input:?} produced {} suggestions",
+                suggestions.len()
+            );
+            for suggestion in &suggestions {
+                assert!(
+                    is_valid_phone_number(suggestion),
+                    "{suggestion} was suggested for {input:?} but is not valid"
+                );
+                assert_eq!(
+                    normalize_phone_number(suggestion).as_deref(),
+                    Some(suggestion.as_str()),
+                    "{suggestion} is not canonical"
+                );
+            }
+            let mut deduped = suggestions.clone();
+            deduped.sort();
+            deduped.dedup();
+            assert_eq!(
+                deduped.len(),
+                suggestions.len(),
+                "duplicate suggestions for {input:?}"
+            );
+        }
+    }
+
+    /// The documented five-suggestion cap, pinned by an input that overflows it.
+    /// `found.truncate(5)` can otherwise be changed to any smaller number
+    /// without a test noticing.
+    #[test]
+    fn the_list_is_cut_at_exactly_five() {
+        for (input, hint) in [
+            ("07911123456", None),
+            ("+1 202 555 017", Some("US")),
+            ("+44 20 7946 09580", Some("GB")),
+        ] {
+            assert_eq!(
+                suggest_phone_number_corrections(input, hint).len(),
+                5,
+                "{input:?} must saturate the cap"
+            );
+        }
+    }
+
+    /// An unrecognised hint fails closed, exactly like
+    /// `PhoneNumber::parse_with_country` and
+    /// `extract_phone_numbers_with_country_hint`. Falling back to "no hint"
+    /// would answer with a number from a country the caller never named — for
+    /// `"2025550173"` that is the Egyptian `+2025550173`.
+    #[test]
+    fn an_unrecognised_hint_yields_nothing() {
+        for hint in ["ZZ", "USA", "", "1", "XX", "gbr"] {
+            assert!(
+                suggest_phone_number_corrections("2025550173", Some(hint)).is_empty(),
+                "hint {hint:?} must yield no suggestions"
+            );
+        }
+        // Without a hint the same digits do produce a suggestion, so the empty
+        // result above is the hint failing closed rather than the input being
+        // hopeless.
+        assert_eq!(
+            suggest_phone_number_corrections("2025550173", None),
+            vec!["+2025550173".to_string()]
+        );
+        // A differently-cased code is not a typo; it is the same country.
+        assert_eq!(
+            suggest_phone_number_corrections("2025550173", Some("us")),
+            vec!["+12025550173".to_string()]
+        );
+    }
+
+    /// Regression: tiers 3 and 4 of `suggest_phone_number_corrections` used to
+    /// generate the bare global reading `format!("+{}", edited)` before the
+    /// hinted one for every edit position, then truncate to five. A global
+    /// reading found at the first edit position filled the whole list, so
+    /// `("+1 202 555 017", Some("US"))` answered with five numbers from the
+    /// Netherlands, Switzerland, Peru, Australia and Russia — contradicting
+    /// both the function's doc and its own doctest.
+    #[test]
+    fn suggestions_for_a_hinted_input_reach_the_hint_country() {
+        for (input, hint) in [
+            ("+1 202 555 017", "US"),
+            ("+1 202 555 01730", "US"),
+            ("+44 20 7946 09580", "GB"),
+        ] {
+            let suggestions = suggest_phone_number_corrections(input, Some(hint));
+            assert!(
+                suggestions
+                    .iter()
+                    .any(|s| extract_country(s).map(|c| c.code) == Some(hint)),
+                "no suggestion for {input:?} is in the hinted country {hint}: {suggestions:?}"
+            );
+        }
+        // The obvious single deletion of the trailing digit.
+        assert!(
+            suggest_phone_number_corrections("+44 20 7946 09580", Some("GB"))
+                .contains(&"+442079460958".to_string())
+        );
+    }
+
+    #[test]
+    fn hopeless_input_yields_no_suggestions() {
+        for input in ["", "nonsense", "9876", "+442079460958123456789012"] {
+            assert!(
+                suggest_phone_number_corrections(input, None).is_empty(),
+                "{input:?} should not be repairable"
+            );
+        }
+    }
+
+    #[test]
+    fn potentially_valid_is_implied_by_valid() {
+        let corpus: Vec<&str> = VALIDATION_CASES
+            .iter()
+            .map(|&(s, _)| s)
+            .chain(COUNTRY_FIXTURE.iter().map(|&(_, s)| s))
+            .collect();
+
+        for input in corpus {
+            if is_valid_phone_number(input) {
+                assert!(
+                    is_potentially_valid_phone_number(input),
+                    "{input:?} is valid but not potentially valid"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn potentially_valid_rejects_the_hopeless() {
+        assert!(!is_potentially_valid_phone_number("12"));
+        assert!(!is_potentially_valid_phone_number("000000000"));
+        assert!(!is_potentially_valid_phone_number(""));
+        assert!(!is_potentially_valid_phone_number("+4312345678901234"));
+        assert!(is_potentially_valid_phone_number("202-555-0173"));
+    }
+}
+
+// ============================================================================
+// Text API wrappers
+// ============================================================================
+
+mod text_api {
+    use super::*;
+
+    /// Every reported span must slice back to exactly the reported `raw`, and
+    /// spans must not overlap.
+    #[track_caller]
+    fn checked(text: &str) -> Vec<ExtractedPhoneNumber> {
+        let numbers = extract_phone_numbers_from_text(text);
+        let mut previous_end = 0;
+        for number in &numbers {
+            assert!(
+                number.start >= previous_end,
+                "overlapping spans in {text:?}"
+            );
+            assert!(number.end > number.start, "empty span in {text:?}");
+            assert_eq!(
+                &text[number.start..number.end],
+                number.raw,
+                "span/raw mismatch"
+            );
+            assert_eq!(number.is_valid, number.normalized.is_some());
+            previous_end = number.end;
+        }
+        numbers
+    }
+
+    #[test]
+    fn extracts_international_numbers_with_exact_offsets() {
+        let text = "Call me at +1-202-555-0173 or (415) 555-2671";
+        let numbers = checked(text);
+        assert_eq!(numbers.len(), 2);
+
+        assert_eq!(numbers[0].raw, "+1-202-555-0173");
+        assert_eq!(numbers[0].normalized.as_deref(), Some("+12025550173"));
+        assert!(numbers[0].is_valid);
+        assert_eq!(numbers[0].start, 11);
+        assert_eq!(numbers[0].end, 26);
+
+        assert_eq!(numbers[1].raw, "(415) 555-2671");
+        assert!(!numbers[1].is_valid);
+    }
+
+    #[test]
+    fn adjacent_numbers_are_not_merged() {
+        let numbers = checked("Call 2025550173 4155552671 now");
+        assert_eq!(
+            numbers.iter().map(|n| n.raw.as_str()).collect::<Vec<_>>(),
+            ["2025550173", "4155552671"]
+        );
+    }
+
+    #[test]
+    fn separators_inside_a_number_do_not_break_extraction() {
+        for text in [
+            "Call +1 202\u{00A0}555\u{00A0}0173 now",
+            "Call +1 202\u{2013}555\u{2013}0173 now",
+            "Call +1 202\t555\t0173 now",
+            "Call +1 202  555  0173 now",
+            "Call +1 202 - 555 - 0173 now",
+        ] {
+            let numbers = checked(text);
+            assert_eq!(numbers.len(), 1, "no match in {text:?}");
+            assert_eq!(
+                numbers[0].normalized.as_deref(),
+                Some("+12025550173"),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fullwidth_numbers_are_extracted() {
+        let text = "Call \u{FF0B}\u{FF18}\u{FF11}\u{FF13}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}\u{FF16}\u{FF17}\u{FF18} now";
+        let numbers = checked(text);
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].normalized.as_deref(), Some("+81312345678"));
+    }
+
+    #[test]
+    fn a_plus_inside_a_word_is_not_a_number_start() {
+        assert!(checked("C++12025550173").is_empty());
+        assert!(checked("email me at bob+12025550173@example.com").is_empty());
+        // "Zip+4" must not become a country code.
+        for number in checked("Zip+4 90210-1234") {
+            assert!(!number.raw.starts_with('+'), "{:?}", number.raw);
+        }
+    }
+
+    #[test]
+    fn structured_numeric_data_is_not_mistaken_for_a_phone_number() {
+        for text in [
+            "Version 3.141592653589793 here",
+            "IP 192.168.1.100 and date 2024-01-15",
+            "ISBN 978-3-16-148410-0 here",
+        ] {
+            assert!(checked(text).is_empty(), "false positive in {text:?}");
+        }
+    }
+
+    #[test]
+    fn digit_runs_longer_than_e164_are_rejected_not_truncated() {
+        for text in [
+            "digits 0123456789012345 here",
+            "digits 01234567890123456 here",
+            "digits 012345678901234567890123456789 here",
+        ] {
+            assert!(
+                checked(text).is_empty(),
+                "{text:?} produced a truncated candidate"
+            );
+        }
+    }
+
+    #[test]
+    fn balanced_parentheses_belong_to_the_number() {
+        let numbers = checked("(2025550173)");
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].raw, "(2025550173)");
+        assert_eq!(numbers[0].start, 0);
+        assert_eq!(numbers[0].end, 12);
+    }
+
+    #[test]
+    fn a_following_parenthesised_digit_is_not_swallowed() {
+        let text = "Call 202-555-0173 (3 lines available)";
+        let numbers = checked(text);
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].raw, "202-555-0173");
+        assert_eq!(
+            redact_phone_numbers(text, 0),
+            "Call [PHONE] (3 lines available)"
+        );
+    }
+
+    #[test]
+    fn extract_valid_keeps_only_parseable_numbers() {
+        let numbers = extract_valid_phone_numbers_from_text("Call +12025550173 or 123");
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].normalized.as_deref(), Some("+12025550173"));
+        assert!(numbers.iter().all(|n| n.is_valid));
+
+        assert!(extract_valid_phone_numbers_from_text("nothing here").is_empty());
+    }
+
+    #[test]
+    fn count_matches_the_extractor() {
+        for text in [
+            "+12025550173 and +442079460958",
+            "no numbers here",
+            "",
+            "Call me at +1-202-555-0173 or (415) 555-2671",
+        ] {
+            assert_eq!(
+                count_phone_numbers_in_text(text),
+                extract_phone_numbers_from_text(text).len(),
+                "{text:?}"
+            );
+        }
+        assert_eq!(
+            count_phone_numbers_in_text("+12025550173 and +442079460958"),
+            2
+        );
+    }
+
+    /// `(text, the number as written inside it, hint, expected E.164)`.
+    ///
+    /// The Italian rows are the ones that matter most: `src/text.rs::validate`
+    /// used to strip a leading `0` unconditionally on the hint path, so it
+    /// disagreed with `PhoneNumber::parse_with_country` for every country whose
+    /// leading zero is significant — and returned a *different, still valid*
+    /// number rather than failing. `011 123 4567` is Turin, and doubles as the
+    /// case `src/text.rs`'s "an IDD prefix only counts when the remainder
+    /// parses" comment cites.
+    const HINTED_TEXT_CASES: &[(&str, &str, &str, &str)] = &[
+        (
+            "Call (202) 555-0173",
+            "(202) 555-0173",
+            "US",
+            "+12025550173",
+        ),
+        (
+            "Rufen Sie 030 12345678 an",
+            "030 12345678",
+            "DE",
+            "+493012345678",
+        ),
+        (
+            "Appelez 01 42 68 53 00",
+            "01 42 68 53 00",
+            "FR",
+            "+33142685300",
+        ),
+        ("Call 020 7946 0958", "020 7946 0958", "GB", "+442079460958"),
+        ("Call 0412 345 678", "0412 345 678", "AU", "+61412345678"),
+        // A national number shorter than the no-hint floor is reachable
+        // once the hint supplies the country's own length table.
+        ("call 849338 now", "849338", "AD", "+376849338"),
+        // Italy keeps its leading zero: Rome, Turin and Milan.
+        (
+            "chiama 06 6982 1234 oggi",
+            "06 6982 1234",
+            "IT",
+            "+390669821234",
+        ),
+        (
+            "chiama 011 123 4567 oggi",
+            "011 123 4567",
+            "IT",
+            "+390111234567",
+        ),
+        (
+            "chiama 02 1234 5678 oggi",
+            "02 1234 5678",
+            "IT",
+            "+390212345678",
+        ),
+    ];
+
+    #[test]
+    fn country_hint_resolves_national_formats() {
+        for &(text, written, hint, expected) in HINTED_TEXT_CASES {
+            let numbers = extract_phone_numbers_with_country_hint(text, hint);
+            assert_eq!(numbers.len(), 1, "{text:?} with hint {hint}");
+            assert_eq!(numbers[0].raw, written, "{text:?} with hint {hint}");
+            assert_eq!(
+                numbers[0].normalized.as_deref(),
+                Some(expected),
+                "{text:?} with hint {hint}"
+            );
+        }
+    }
+
+    /// The two hinted-parse entry points must never disagree: the text
+    /// extractor delegates to `PhoneNumber::parse_with_country` rather than
+    /// reimplementing trunk-prefix handling.
+    #[test]
+    fn the_text_hint_agrees_with_parse_with_country() {
+        for &(text, written, hint, expected) in HINTED_TEXT_CASES {
+            let extracted = extract_phone_numbers_with_country_hint(text, hint);
+            let parsed = PhoneNumber::parse_with_country(written, hint)
+                .unwrap_or_else(|| panic!("{written:?} with hint {hint} must parse"));
+            assert_eq!(parsed.e164(), expected, "{written:?} with hint {hint}");
+            assert_eq!(
+                extracted.first().and_then(|n| n.normalized.as_deref()),
+                Some(parsed.e164()),
+                "the extractor and parse_with_country disagree on {written:?} / {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_country_code_wins_over_the_hint() {
+        let numbers = extract_phone_numbers_with_country_hint("Call +12025550173", "DE");
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].normalized.as_deref(), Some("+12025550173"));
+        assert!(numbers[0].is_valid);
+    }
+
+    #[test]
+    fn hint_extraction_preserves_raw_and_offsets() {
+        let text = "Ring 020 7946 0958 today";
+        let numbers = extract_phone_numbers_with_country_hint(text, "GB");
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].raw, "020 7946 0958");
+        assert_eq!(&text[numbers[0].start..numbers[0].end], numbers[0].raw);
+    }
+
+    #[test]
+    fn replace_rewrites_every_match_and_leaves_the_rest_alone() {
+        assert_eq!(
+            replace_phone_numbers_in_text("A +12025550173 B +442079460958 C", |n| format!(
+                "<{}>",
+                n.normalized.as_deref().unwrap_or("?")
+            )),
+            "A <+12025550173> B <+442079460958> C"
+        );
+        // Zero matches: the text comes back byte-for-byte.
+        assert_eq!(
+            replace_phone_numbers_in_text("nothing here", |_| "X".to_string()),
+            "nothing here"
+        );
+        // The closure sees the raw text and the span it came from.
+        let text = "Call +12025550173 now";
+        assert_eq!(
+            replace_phone_numbers_in_text(text, |n| format!("{}@{}", n.raw, n.start)),
+            "Call +12025550173@5 now"
+        );
+    }
+
+    #[test]
+    fn replace_handles_non_ascii_surroundings() {
+        assert_eq!(
+            replace_phone_numbers_in_text("Ruf \u{00E4}n +12025550173 \u{1F600}", |_| "X"
+                .to_string()),
+            "Ruf \u{00E4}n X \u{1F600}"
+        );
+    }
+
+    #[test]
+    fn redaction_masks_all_but_the_visible_digits() {
+        assert_eq!(
+            redact_phone_numbers("Call +12025550173", 4),
+            "Call *******0173"
+        );
+        assert_eq!(
+            redact_phone_numbers("Call +12025550173", 1),
+            "Call **********3"
+        );
+    }
+
+    #[test]
+    fn redaction_edge_branches() {
+        // Zero visible digits replaces the whole number.
+        assert_eq!(redact_phone_numbers("Call +12025550173", 0), "Call [PHONE]");
+        // Asking for at least as many digits as the number has must not
+        // reveal it.
+        assert_eq!(
+            redact_phone_numbers("Call +12025550173", 11),
+            "Call [PHONE]"
+        );
+        assert_eq!(
+            redact_phone_numbers("Call +12025550173", 12),
+            "Call [PHONE]"
+        );
+        assert_eq!(
+            redact_phone_numbers("Call +12025550173", usize::MAX),
+            "Call [PHONE]"
+        );
+        // No numbers: unchanged.
+        assert_eq!(redact_phone_numbers("no numbers", 4), "no numbers");
+        assert_eq!(redact_phone_numbers("", 4), "");
+    }
+
+    #[test]
+    fn redaction_never_leaks_digits_of_an_adjacent_number() {
+        assert_eq!(
+            redact_phone_numbers("Call 2025550173 4155552671 now", 0),
+            "Call [PHONE] [PHONE] now"
+        );
+        assert_eq!(
+            redact_phone_numbers("Numbers: 2025550173 4155552671", 0),
+            "Numbers: [PHONE] [PHONE]"
+        );
+    }
+
+    #[test]
+    fn extraction_handles_empty_and_number_free_text() {
+        assert!(checked("").is_empty());
+        assert!(checked("no numbers here").is_empty());
+        assert!(extract_phone_numbers_with_country_hint("", "US").is_empty());
+        assert_eq!(count_phone_numbers_in_text(""), 0);
+    }
+}
+
+// ============================================================================
+// PhoneNumber
+// ============================================================================
+
+mod phone_number {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::str::FromStr;
+
+    #[test]
+    fn accessors_expose_every_part_of_the_number() {
+        let parsed = PhoneNumber::parse("+1 (202) 555-0173 ext. 42").unwrap();
+        assert_eq!(parsed.original(), "+1 (202) 555-0173 ext. 42");
+        assert_eq!(parsed.e164(), "+12025550173");
+        assert_eq!(parsed.national_number(), "2025550173");
+        assert_eq!(parsed.country().code, "US");
+        assert_eq!(parsed.country().name, "United States");
+        assert_eq!(parsed.country_code(), 1);
+        assert_eq!(parsed.phone_type(), PhoneNumberType::FixedLineOrMobile);
+        assert_eq!(parsed.extension(), Some("42"));
+    }
+
+    #[test]
+    fn national_number_never_returns_the_e164_string() {
+        for &(_, number) in COUNTRY_FIXTURE {
+            let parsed = PhoneNumber::parse(number).unwrap();
+            let national = parsed.national_number();
+            assert!(!national.starts_with('+'), "{number} -> {national}");
+            assert!(
+                national.bytes().all(|b| b.is_ascii_digit()),
+                "{number} -> {national}"
+            );
+            assert!(
+                number.ends_with(national),
+                "{number} does not end with {national}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_territorys_area_code_belongs_to_its_calling_code() {
+        let antigua = PhoneNumber::parse("+12685550173").unwrap();
+        assert_eq!(antigua.country().code, "AG");
+        assert_eq!(antigua.country_code(), 1268);
+        assert_eq!(antigua.national_number(), "5550173");
+        // The written international form still shows the NANP shape.
+        assert_eq!(
+            antigua.format(PhoneFormat::International),
+            "+1 268 555 0173"
+        );
+        assert_eq!(antigua.format(PhoneFormat::National), "(268) 555-0173");
+    }
+
+    #[test]
+    fn parse_rejects_invalid_input() {
+        assert!(PhoneNumber::parse("nonsense").is_none());
+        assert!(PhoneNumber::parse("").is_none());
+        assert!(PhoneNumber::parse("+11111111111").is_none());
+    }
+
+    #[test]
+    fn try_parse_reports_the_reason() {
+        assert_eq!(
+            PhoneNumber::try_parse("+1202555").unwrap_err(),
+            ParseError::InvalidLength
+        );
+        assert_eq!(
+            PhoneNumber::try_parse("HELLO WORLD").unwrap_err(),
+            ParseError::InvalidCharacter
+        );
+        assert_eq!(PhoneNumber::try_parse("").unwrap_err(), ParseError::Empty);
+        assert_eq!(
+            PhoneNumber::try_parse("+12025550173").unwrap().e164(),
+            "+12025550173"
+        );
+    }
+
+    #[test]
+    fn parse_with_country_resolves_national_formats() {
+        for (input, hint, expected) in [
+            ("020 7946 0958", "GB", "+442079460958"),
+            ("2025550173", "US", "+12025550173"),
+            ("030 12345678", "DE", "+493012345678"),
+            ("01 42 68 53 00", "FR", "+33142685300"),
+            ("0412 345 678", "AU", "+61412345678"),
+            ("8 916 123-45-67", "RU", "+79161234567"),
+            ("090-1234-5678", "JP", "+819012345678"),
+            // Italy keeps its leading zero.
+            ("06 9812 3456", "IT", "+390698123456"),
+        ] {
+            let parsed = PhoneNumber::parse_with_country(input, hint)
+                .unwrap_or_else(|| panic!("{input:?} with hint {hint} must parse"));
+            assert_eq!(parsed.e164(), expected, "{input:?} with hint {hint}");
+            assert_eq!(parsed.original(), input, "original must be preserved");
+        }
+    }
+
+    #[test]
+    fn parse_with_country_takes_the_idd_path_when_nothing_else_fits() {
+        // "0011" is the Australian IDD prefix; the digits after it spell a UK
+        // number, and no Australian reading works.
+        let parsed = PhoneNumber::parse_with_country("0011442079460958", "AU").unwrap();
+        assert_eq!(parsed.e164(), "+442079460958");
+        assert_eq!(parsed.country().code, "GB");
+        assert_eq!(parsed.original(), "0011442079460958");
+    }
+
+    #[test]
+    fn parse_with_country_never_lets_the_hint_contradict_the_number() {
+        // An explicit '+' wins over the hint.
+        let parsed = PhoneNumber::parse_with_country("+12025550173", "DE").unwrap();
+        assert_eq!(parsed.country().code, "US");
+        assert_eq!(parsed.country_code(), 1);
+
+        // Under calling code 1 the area code, not the hint, picks the country,
+        // and every derived value follows the country that was resolved.
+        for (input, hint, expected_country, expected_e164, expected_national) in [
+            ("2685550173", "US", "AG", "+12685550173", "5550173"),
+            ("4165550198", "US", "CA", "+14165550198", "4165550198"),
+            ("2025550173", "CA", "US", "+12025550173", "2025550173"),
+        ] {
+            let parsed = PhoneNumber::parse_with_country(input, hint).unwrap();
+            assert_eq!(parsed.country().code, expected_country, "{input} / {hint}");
+            assert_eq!(parsed.e164(), expected_e164);
+            assert_eq!(parsed.national_number(), expected_national);
+            // The type must be the one the resolved country implies.
+            assert_eq!(
+                parsed.phone_type(),
+                detect_phone_number_type(expected_e164).unwrap(),
+                "{input} / {hint}: stale phone_type"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_with_country_rejects_an_unknown_hint() {
+        assert!(PhoneNumber::parse_with_country("020 7946 0958", "ZZ").is_none());
+        assert_eq!(
+            PhoneNumber::try_parse_with_country("020 7946 0958", "ZZ").unwrap_err(),
+            ParseError::UnknownCountry
+        );
+        // A typo'd hint must never be more permissive than a correct one.
+        assert!(PhoneNumber::parse_with_country("020 7946 0958", "GBR").is_none());
+        // Differently-cased is not a typo — it is the same country.
+        assert_eq!(
+            PhoneNumber::parse_with_country("020 7946 0958", "gb").map(|p| p.e164().to_string()),
+            Some("+442079460958".to_string())
+        );
+        assert!(PhoneNumber::parse_with_country("", "US").is_none());
+        assert!(PhoneNumber::parse_with_country("nonsense", "US").is_none());
+    }
+
+    #[test]
+    fn parse_with_country_keeps_the_extension() {
+        let parsed = PhoneNumber::parse_with_country("(202) 555-0173 ext. 42", "US").unwrap();
+        assert_eq!(parsed.e164(), "+12025550173");
+        assert_eq!(parsed.extension(), Some("42"));
+    }
+
+    #[test]
+    fn extension_markers() {
+        for (input, extension) in [
+            ("+1 202-555-0173 ext. 42", Some("42")),
+            ("+1 202-555-0173 ext 42", Some("42")),
+            ("+1 202-555-0173 EXT:42", Some("42")),
+            ("+1 202-555-0173 ext-42", Some("42")),
+            ("+1 202-555-0173 extn 42", Some("42")),
+            ("+1 202-555-0173 extension 42", Some("42")),
+            ("+1 202-555-0173 x42", Some("42")),
+            ("+1 202-555-0173 #42", Some("42")),
+            ("+1 202-555-0173,42", Some("42")),
+            ("+1 202-555-0173;42", Some("42")),
+            ("tel:+12025550173;ext=42", Some("42")),
+            ("+1 202 555 0173 p42", Some("42")),
+            ("+1 202 555 0173 w42", Some("42")),
+            // No extension at all.
+            ("+1 202-555-0173", None),
+            ("+1 202-555-0173 ext.", None),
+        ] {
+            let parsed =
+                PhoneNumber::parse(input).unwrap_or_else(|| panic!("{input:?} must parse"));
+            assert_eq!(parsed.extension(), extension, "extension of {input:?}");
+            assert_eq!(parsed.e164(), "+12025550173", "e164 of {input:?}");
+        }
+    }
+
+    #[test]
+    fn vanity_letters_convert_but_prose_does_not() {
+        let flowers = PhoneNumber::parse("1-800-FLOWERS").unwrap();
+        assert_eq!(flowers.e164(), "+18003569377");
+        assert_eq!(flowers.extension(), None);
+
+        assert!(PhoneNumber::parse("HELLO WORLD").is_none());
+        assert!(PhoneNumber::parse("ILOVEYOUXX").is_none());
+    }
+
+    #[test]
+    fn equality_and_ordering_follow_the_normalized_form() {
+        let a = PhoneNumber::parse("+1 202-555-0173").unwrap();
+        let b = PhoneNumber::parse("+1 (202) 555-0173").unwrap();
+        let c = PhoneNumber::parse("+12025550174").unwrap();
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert!(a < c);
+        assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+        assert_eq!(a.partial_cmp(&c), Some(std::cmp::Ordering::Less));
+
+        // The original spelling is retained even though it does not affect
+        // equality.
+        assert_eq!(a.original(), "+1 202-555-0173");
+        assert_eq!(b.original(), "+1 (202) 555-0173");
+
+        let mut sorted = [c.clone(), a.clone()];
+        sorted.sort();
+        assert_eq!(sorted[0].e164(), "+12025550173");
+    }
+
+    #[test]
+    fn equal_numbers_hash_equally() {
+        fn hash_of(value: &PhoneNumber) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        let a = PhoneNumber::parse("+1 202-555-0173").unwrap();
+        let b = PhoneNumber::parse("+1 (202) 555-0173").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
+
+        let set: std::collections::HashSet<PhoneNumber> = [a, b].into_iter().collect();
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn standard_trait_impls() {
+        let parsed = PhoneNumber::parse("+1 (202) 555-0173").unwrap();
+
+        assert_eq!(parsed.to_string(), "+12025550173");
+        assert_eq!(format!("{parsed}"), "+12025550173");
+        assert!(format!("{parsed:?}").contains("+12025550173"));
+        assert_eq!(<PhoneNumber as AsRef<str>>::as_ref(&parsed), "+12025550173");
+        assert_eq!(parsed.clone(), parsed);
+
+        let from_str = PhoneNumber::from_str("+12025550173").unwrap();
+        assert_eq!(from_str.e164(), "+12025550173");
+        assert_eq!(
+            "nonsense".parse::<PhoneNumber>().unwrap_err(),
+            ParseError::InvalidCharacter
+        );
+
+        let try_from_ref = PhoneNumber::try_from("+12025550173").unwrap();
+        assert_eq!(try_from_ref.e164(), "+12025550173");
+        let try_from_owned = PhoneNumber::try_from("+12025550173".to_string()).unwrap();
+        assert_eq!(try_from_owned.e164(), "+12025550173");
+        assert_eq!(
+            PhoneNumber::try_from("nonsense").unwrap_err(),
+            ParseError::InvalidCharacter
+        );
+    }
+
+    #[test]
+    fn is_predicates_return_the_right_answer_not_just_a_value() {
+        let mobile = PhoneNumber::parse("+447911123456").unwrap();
+        assert!(mobile.is_mobile());
+        assert!(!mobile.is_landline());
+        assert!(!mobile.is_toll_free());
+
+        let landline = PhoneNumber::parse("+442079460958").unwrap();
+        assert!(!landline.is_mobile());
+        assert!(landline.is_landline());
+        assert!(!landline.is_toll_free());
+
+        let toll_free = PhoneNumber::parse("+448001234567").unwrap();
+        assert!(!toll_free.is_mobile());
+        assert!(!toll_free.is_landline());
+        assert!(toll_free.is_toll_free());
+
+        // A NANP geographic number is neither, because its range carries both.
+        let nanp = PhoneNumber::parse("+12025550173").unwrap();
+        assert!(!nanp.is_mobile());
+        assert!(!nanp.is_landline());
+        assert!(!nanp.is_toll_free());
+    }
+
+    #[test]
+    fn format_agrees_with_the_free_function() {
+        for &(_, number) in COUNTRY_FIXTURE {
+            let parsed = PhoneNumber::parse(number).unwrap();
+            for format in [
+                PhoneFormat::E164,
+                PhoneFormat::International,
+                PhoneFormat::National,
+                PhoneFormat::RFC3966,
+            ] {
+                assert_eq!(
+                    Some(parsed.format(format)),
+                    format_phone_number(number, format),
+                    "{number} / {format:?}"
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
+// PhoneNumberSet
+// ============================================================================
+
+mod phone_number_set {
+    use super::*;
+
+    #[test]
+    fn add_deduplicates_by_normalized_form() {
+        let mut set = PhoneNumberSet::new();
+        assert!(set.add("+1-202-555-0173"));
+        assert!(!set.add("+1 (202) 555-0173"));
+        assert_eq!(set.len(), 1);
+        assert!(!set.is_empty());
+    }
+
+    #[test]
+    fn try_add_distinguishes_a_duplicate_from_a_rejection() {
+        let mut set = PhoneNumberSet::new();
+        assert_eq!(set.try_add("+12025550173"), Ok(true));
+        assert_eq!(set.try_add("+1 202-555-0173"), Ok(false));
+        assert_eq!(set.try_add("nonsense"), Err(ParseError::InvalidCharacter));
+        assert_eq!(set.try_add(""), Err(ParseError::Empty));
+        assert_eq!(set.len(), 1);
+
+        // `add` collapses both failure modes to `false`, as documented.
+        assert!(!set.add("nonsense"));
+        assert!(!set.add("+1 202-555-0173"));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn contains_and_get_accept_any_formatting() {
+        let mut set = PhoneNumberSet::new();
+        assert!(set.add("+1-202-555-0173"));
+
+        assert!(set.contains("+12025550173"));
+        assert!(set.contains("+1 (202) 555-0173"));
+        assert!(set.contains("tel:+12025550173"));
+        assert!(!set.contains("+12025550174"));
+        assert!(!set.contains("nonsense"));
+
+        let stored = set.get("+1 (202) 555-0173").expect("must be found");
+        assert_eq!(stored.e164(), "+12025550173");
+        // `get` returns the value as it was stored, not the lookup spelling.
+        assert_eq!(stored.original(), "+1-202-555-0173");
+        assert!(set.get("+12025550174").is_none());
+        assert!(set.get("nonsense").is_none());
+    }
+
+    #[test]
+    fn remove_accepts_any_formatting() {
+        let mut set = PhoneNumberSet::new();
+        assert!(set.add("+12025550173"));
+        assert!(set.remove("12025550173"));
+        assert!(set.is_empty());
+        assert!(!set.remove("12025550173"));
+        assert!(!set.remove("nonsense"));
+    }
+
+    #[test]
+    fn normalized_numbers_lists_every_stored_key() {
+        let mut set = PhoneNumberSet::new();
+        assert!(set.add("+1-202-555-0173"));
+        assert!(set.add("+44 20 7946 0958"));
+
+        let mut normalized = set.normalized_numbers();
+        normalized.sort_unstable();
+        assert_eq!(normalized, ["+12025550173", "+442079460958"]);
+        assert_eq!(normalized.len(), set.len());
+
+        assert!(PhoneNumberSet::new().normalized_numbers().is_empty());
+    }
+
+    #[test]
+    fn iteration_by_reference_and_by_value() {
+        let mut set = PhoneNumberSet::new();
+        assert!(set.add("+12025550173"));
+        assert!(set.add("+442079460958"));
+
+        assert_eq!(set.iter().count(), 2);
+
+        let mut by_ref: Vec<&str> = (&set).into_iter().map(|p| p.e164()).collect();
+        by_ref.sort_unstable();
+        assert_eq!(by_ref, ["+12025550173", "+442079460958"]);
+
+        let mut by_value: Vec<String> = set
+            .clone()
+            .into_iter()
+            .map(|p| p.e164().to_string())
+            .collect();
+        by_value.sort();
+        assert_eq!(by_value, ["+12025550173", "+442079460958"]);
+
+        // `for n in &set` must compile.
+        let mut seen = 0;
+        for number in &set {
+            assert!(number.e164().starts_with('+'));
+            seen += 1;
+        }
+        assert_eq!(seen, 2);
+    }
+
+    #[test]
+    fn default_is_an_empty_set() {
+        let set = PhoneNumberSet::default();
+        assert_eq!(set.len(), 0);
+        assert!(set.is_empty());
+        assert!(set.normalized_numbers().is_empty());
+        assert_eq!(set, PhoneNumberSet::new());
+    }
+
+    #[test]
+    fn extend_and_from_iterator() {
+        let mut set = PhoneNumberSet::new();
+        set.extend(["+12025550173", "+442079460958", "nonsense"]);
+        assert_eq!(set.len(), 2, "invalid input must be skipped, not stored");
+
+        let from_str_refs: PhoneNumberSet = ["+12025550173", "12025550173", "+442079460958"]
+            .into_iter()
+            .collect();
+        assert_eq!(from_str_refs.len(), 2);
+
+        let from_owned: PhoneNumberSet = vec![
+            "+12025550173".to_string(),
+            "+1 (202) 555-0173".to_string(),
+            "+442079460958".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(from_owned.len(), 2);
+
+        assert_eq!(from_str_refs, from_owned);
+    }
+
+    #[test]
+    fn equality_and_clone() {
+        let mut a = PhoneNumberSet::new();
+        assert!(a.add("+12025550173"));
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        let mut c = PhoneNumberSet::new();
+        assert!(c.add("+442079460958"));
+        assert_ne!(a, c);
+
+        assert!(format!("{a:?}").contains("+12025550173"));
+    }
+}
+
+// ============================================================================
+// Regressions
+//
+// One test per fixed audit finding. Each names the defect it pins; every one
+// of them fails against the pre-rewrite code.
+// ============================================================================
+
+mod regressions {
+    use super::*;
+
+    // --- parsing and normalization -----------------------------------------
+
+    /// Trunk-zero stripping used to corrupt canonical Italian E.164 numbers
+    /// into different, valid numbers, so `+390698123456` became
+    /// `+39698123456` and the two compared equal.
+    #[test]
+    fn italian_leading_zero_is_significant() {
+        assert_eq!(
+            normalize_phone_number("+390698123456").as_deref(),
+            Some("+390698123456")
+        );
+        assert!(!are_phone_numbers_equal("+390698123456", "+39698123456"));
+        assert_eq!(
+            PhoneNumber::parse_with_country("+39 06 9812 3456", "IT")
+                .unwrap()
+                .e164(),
+            "+390698123456"
+        );
+        // The Vatican shares the Italian plan, and `LEADING_ZERO_SIGNIFICANT`
+        // lists "VA" — but VA's `[10]` is wholly inside IT's `[6..=11]`, so no
+        // number ever resolves to VA and the entry is belt-and-braces. A VA hint
+        // returns an Italian number; that is what is actually observable.
+        let vatican = PhoneNumber::parse_with_country("06 6982 1234", "VA")
+            .expect("a VA hint must still parse");
+        assert_eq!(vatican.country().code, "IT");
+        assert_eq!(vatican.e164(), "+390669821234");
+        assert_eq!(
+            extract_countries("+390669821234")
+                .iter()
+                .map(|c| c.code)
+                .collect::<Vec<_>>(),
+            ["IT", "VA"],
+            "VA is only ever reachable as a secondary candidate"
+        );
+    }
+
+    /// Benin, Côte d'Ivoire and San Marino also keep a significant leading zero,
+    /// and used to have it stripped: the shortened number then failed the length
+    /// check, so every one of these came back as *invalid* rather than as a
+    /// different number.
+    #[test]
+    fn other_plans_that_keep_a_significant_leading_zero() {
+        for (number, expected_country) in [
+            // Benin's 2024 renumbering prepended `01` to every number.
+            ("+2290197123456", "BJ"),
+            ("+2290112345678", "BJ"),
+            // Côte d'Ivoire's flat 10-digit plan: `01`, `05` and `07` mobiles.
+            ("+2250712345678", "CI"),
+            ("+2250123456789", "CI"),
+            // San Marino's fixed-line plan is `0549 xxxxxx`.
+            ("+3780549123456", "SM"),
+        ] {
+            assert!(is_valid_phone_number(number), "{number} must be valid");
+            assert_eq!(
+                normalize_phone_number(number).as_deref(),
+                Some(number),
+                "{number} lost its leading zero"
+            );
+            assert_eq!(iso(number), expected_country, "{number}");
+        }
+        // San Marino mobiles carry no leading zero and are eight digits.
+        assert_eq!(iso("+37866123456"), "SM");
+    }
+
+    /// Gabon is deliberately *not* on that list. It writes `0XX XX XX XX`
+    /// nationally, but the ITU is explicit that international callers dial the
+    /// eight digits after the zero, so the zero is an ordinary trunk prefix.
+    /// Adding `"GA"` to `LEADING_ZERO_SIGNIFICANT` makes the second number here
+    /// validate as a nine-digit Gabonese number that does not exist.
+    #[test]
+    fn a_trunk_zero_is_not_promoted_to_a_significant_one() {
+        assert_eq!(country_by_code("GA").unwrap().phone_lengths, &[8]);
+        assert!(is_valid_phone_number("+24111441234"));
+        assert_eq!(iso("+24111441234"), "GA");
+        assert!(
+            !is_valid_phone_number("+24101441234"),
+            "Gabon's leading zero is a trunk prefix, not part of the number"
+        );
+    }
+
+    /// Everywhere else the leading zero is a national trunk prefix and is not
+    /// part of the E.164 number.
+    #[test]
+    fn trunk_zeros_are_stripped_outside_italy() {
+        assert_eq!(
+            normalize_phone_number("+44 (0)20 7946 0958").as_deref(),
+            Some("+442079460958")
+        );
+        assert_eq!(
+            normalize_phone_number("+49 (0)30 12345678").as_deref(),
+            Some("+493012345678")
+        );
+        assert_eq!(
+            normalize_phone_number("+33 (0)1 42 68 53 00").as_deref(),
+            Some("+33142685300")
+        );
+    }
+
+    /// Unhandled extension markers used to be vanity-converted into digits and
+    /// glued onto the subscriber number, silently producing a different valid
+    /// number.
+    #[test]
+    fn extension_markers_are_never_vanity_converted() {
+        assert_eq!(
+            normalize_phone_number("+43 1 2345678 x1").as_deref(),
+            Some("+4312345678")
+        );
+        assert_eq!(
+            normalize_phone_number("+43 1 2345678 ext-1").as_deref(),
+            Some("+4312345678")
+        );
+        assert_eq!(
+            normalize_phone_number("+39 06 9812345 x").as_deref(),
+            Some("+39069812345")
+        );
+        // A trailing letter that is not an extension marker is not silently
+        // absorbed either; the number is simply the wrong length.
+        assert_eq!(err("+1202555017x"), ParseError::InvalidLength);
+    }
+
+    /// Only `ext.` and `ext ` used to be recognised; every other spelling was
+    /// rejected or mis-parsed.
+    #[test]
+    fn all_documented_extension_markers_parse() {
+        for input in [
+            "+1 202-555-0173 ext. 42",
+            "+1 202-555-0173 ext 42",
+            "+1 202-555-0173 ext:42",
+            "+1 202-555-0173 ext-42",
+            "+1 202-555-0173 extn 42",
+            "+1 202-555-0173 extension 42",
+            "+1 202-555-0173 EXT-42",
+            "+1 202-555-0173 x42",
+            "+1 202-555-0173 #42",
+            "+1 202-555-0173,42",
+            "+1 202-555-0173;42",
+            "tel:+12025550173;ext=42",
+        ] {
+            let parsed =
+                PhoneNumber::parse(input).unwrap_or_else(|| panic!("{input:?} must parse"));
+            assert_eq!(parsed.e164(), "+12025550173", "{input:?}");
+            assert_eq!(parsed.extension(), Some("42"), "{input:?}");
+        }
+    }
+
+    /// `contains_invalid_character` used to allow letters anywhere, so
+    /// arbitrary prose validated as a phone number.
+    #[test]
+    fn prose_is_not_a_phone_number() {
+        for prose in [
+            "HELLO WORLD",
+            "CALL ME NOW PLZ",
+            "ILOVEYOUXX",
+            "hello 12025550173",
+        ] {
+            assert!(!is_valid_phone_number(prose), "{prose:?} must be rejected");
+            assert_eq!(normalize_phone_number(prose), None, "{prose:?}");
+        }
+        // Vanity conversion still works once the input looks like a number.
+        assert_eq!(
+            normalize_phone_number("1-800-FLOWERS").as_deref(),
+            Some("+18003569377")
+        );
+        assert_eq!(
+            normalize_phone_number("1-800-GOT-JUNK").as_deref(),
+            Some("+18004685865")
+        );
+    }
+
+    /// The prose guard is a threshold: `extract_digits` converts vanity letters
+    /// only once at least three digits precede the first letter
+    /// (`VANITY_MIN_LEADING_DIGITS`). Every other negative case in this suite
+    /// has *zero* leading digits and every positive one has four, so the
+    /// boundary itself needs pinning from both sides — loosening the constant to
+    /// 2 or 1 would otherwise ship undetected.
+    #[test]
+    fn vanity_conversion_needs_three_leading_digits() {
+        // One and two leading digits are prose, and are rejected before any
+        // numbering plan is consulted.
+        assert_eq!(err("1CALLNOWXXX"), ParseError::InvalidCharacter);
+        assert_eq!(err("12FLOWERSXX"), ParseError::InvalidCharacter);
+        assert_eq!(err("12FLOWERS"), ParseError::InvalidCharacter);
+
+        // Exactly three gets past the character check and is judged on its
+        // digits alone: this one converts to +1 233 569 3779, whose area code
+        // 233 is not assignable.
+        assert_eq!(err("123FLOWERSX"), ParseError::InvalidAreaCode);
+
+        // …and when the digits do describe a real number, it parses.
+        assert_eq!(
+            normalize_phone_number("+493AAJJMMWW").as_deref(),
+            Some("+49322556699")
+        );
+        assert_eq!(
+            normalize_phone_number("+49322556699").as_deref(),
+            Some("+49322556699"),
+            "the vanity spelling and the digits must agree"
+        );
+
+        // Four or more is the ordinary case.
+        assert!(is_valid_phone_number("1-800-FLOWERS"));
+    }
+
+    /// Non-ASCII digits used to be silently deleted, changing which number was
+    /// parsed. They are now rejected, and only fullwidth forms are folded.
+    #[test]
+    fn stray_unicode_digits_are_rejected_not_deleted() {
+        for input in [
+            "+1\u{0660}2025550173",
+            "+1202555017\u{0663}3",
+            "+43\u{0661}12345678",
+        ] {
+            assert_eq!(
+                try_normalize_phone_number(input).err(),
+                Some(ParseError::InvalidCharacter),
+                "{input:?}"
+            );
+        }
+        // Fullwidth digits are a formatting variant, not a foreign script.
+        assert_eq!(
+            normalize_phone_number("\u{FF0B}\u{FF18}\u{FF11}\u{FF13}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}\u{FF16}\u{FF17}\u{FF18}").as_deref(),
+            Some("+81312345678")
+        );
+    }
+
+    /// `is_valid_phone_number` and `normalize_phone_number` used to disagree on
+    /// a large class of inputs. They now run the same parser.
+    #[test]
+    fn validation_and_normalization_never_disagree() {
+        let corpus = [
+            "+1/202/555/0173",
+            "+1_202_555_0173",
+            "+1@202#555$0173",
+            "+1\n202\t555 0173",
+            "000000000012025550173",
+            "0000000000+12025550173",
+            "+0000000000442079460958",
+            "0000000000000000000012025550173",
+            "00000000001202555017",
+            "1-800-FLOWERS",
+            "HELLO WORLD",
+            "+1 (234 567-8990",
+            "(((((",
+            "",
+        ];
+        for input in corpus {
+            assert_eq!(
+                is_valid_phone_number(input),
+                normalize_phone_number(input).is_some(),
+                "is_valid_phone_number and normalize_phone_number disagree on {input:?}"
+            );
+        }
+    }
+
+    /// `normalize_phone_number` and `normalize_phone_number_in_place` used to
+    /// diverge once the input exceeded the internal 20-digit buffer, because
+    /// one counted leading zeros against the cap and the other did not.
+    #[test]
+    fn in_place_agrees_with_the_borrowing_form_on_long_zero_runs() {
+        for input in [
+            "000000000012025550173",
+            "0000000000000000000012025550173",
+            "+0000000000442079460958",
+            "000 000 000 44 20 7946 0958",
+            "00000000001202555017",
+        ] {
+            let borrowed = normalize_phone_number(input);
+            let mut buffer = input.to_string();
+            let in_place = normalize_phone_number_in_place(&mut buffer);
+            assert_eq!(borrowed, in_place, "{input:?}");
+            assert_eq!(
+                is_valid_phone_number(input),
+                borrowed.is_some(),
+                "is_valid disagrees on {input:?}"
+            );
+        }
+    }
+
+    /// `normalize_phone_number_in_place` used to leave the bare national number
+    /// in the caller's buffer on success and vanity-converted garbage on
+    /// failure, and was not idempotent.
+    #[test]
+    fn in_place_buffer_semantics() {
+        let mut buffer = "+1 (202) 555-0173".to_string();
+        assert_eq!(
+            normalize_phone_number_in_place(&mut buffer).as_deref(),
+            Some("+12025550173")
+        );
+        assert_eq!(buffer, "+12025550173");
+        assert_eq!(
+            normalize_phone_number_in_place(&mut buffer).as_deref(),
+            Some("+12025550173"),
+            "a second call must be a no-op"
+        );
+        assert_eq!(buffer, "+12025550173");
+
+        let mut failed = "hello ext. 5".to_string();
+        assert_eq!(normalize_phone_number_in_place(&mut failed), None);
+        assert_eq!(failed, "hello ext. 5", "the buffer must survive a failure");
+    }
+
+    /// A `+` used to be accepted at any position by the digit scanner while the
+    /// character validator rejected it, so the two disagreed.
+    #[test]
+    fn a_plus_is_only_accepted_as_the_first_character() {
+        assert!(is_valid_phone_number("+12025550173"));
+        assert_eq!(err("1+2025550173"), ParseError::InvalidCharacter);
+        assert_eq!(err("12025550173+"), ParseError::InvalidCharacter);
+        assert_eq!(err("++12025550173"), ParseError::InvalidCharacter);
+    }
+
+    /// A parenthesised calling code — the form used by every North American
+    /// style guide for an international number — ended the candidate at the
+    /// `'('`, so the `+44` was dropped and the national digits were
+    /// re-attributed to whatever country they happened to fit.
+    #[test]
+    fn a_parenthesised_calling_code_is_part_of_the_number() {
+        for (input, expected) in [
+            ("(+44) 20 7946 0958", "+442079460958"),
+            ("(+1) 202 555 0173", "+12025550173"),
+            ("(+49) 30 12345678", "+493012345678"),
+        ] {
+            assert_eq!(
+                normalize_phone_number(input).as_deref(),
+                Some(expected),
+                "{input:?}"
+            );
+            let numbers = extract_phone_numbers_from_text(input);
+            assert_eq!(numbers.len(), 1, "{input:?}");
+            assert_eq!(numbers[0].raw, input, "{input:?}");
+            assert_eq!(
+                numbers[0].normalized.as_deref(),
+                Some(expected),
+                "{input:?}"
+            );
+        }
+        // A `+` anywhere else is still rejected.
+        assert_eq!(err("+1 (+202) 555 0173"), ParseError::InvalidCharacter);
+    }
+
+    /// A NANP hint used to accept only the bare ten digits. All four written
+    /// forms a North American caller actually uses now resolve, and the area
+    /// code — not the hint — still decides which territory the number belongs
+    /// to.
+    #[test]
+    fn nanp_hints_accept_every_written_form() {
+        for (input, hint, expected_e164, expected_country) in [
+            // Bare ten digits.
+            ("202 555 0173", "US", "+12025550173", "US"),
+            // The long-distance trunk `1`.
+            ("1-202-555-0173", "US", "+12025550173", "US"),
+            ("1 (416) 555-0198", "CA", "+14165550198", "CA"),
+            // A territory hint plus a local seven-digit number: the hint's own
+            // area code is what completes it.
+            ("555-0173", "AG", "+12685550173", "AG"),
+            ("555-0123", "JM", "+18765550123", "JM"),
+            // The NANP IDD prefix `011` in front of a foreign number.
+            ("011 44 20 7946 0958", "US", "+442079460958", "GB"),
+        ] {
+            let parsed = PhoneNumber::parse_with_country(input, hint)
+                .unwrap_or_else(|| panic!("{input:?} with hint {hint} must parse"));
+            assert_eq!(parsed.e164(), expected_e164, "{input:?} / {hint}");
+            assert_eq!(
+                parsed.country().code,
+                expected_country,
+                "{input:?} / {hint}"
+            );
+        }
+    }
+
+    /// A leading `00` or `0011` is unambiguously an international prefix — no
+    /// national number starts with two zeros — so it is honoured before any
+    /// national reading. `011` is not: it is a real area code in several plans,
+    /// so it is only tried once every national reading has failed. Japan's
+    /// `0114…` is Sapporo, not `011` + Austria.
+    #[test]
+    fn idd_prefixes_are_ordered_against_the_national_readings() {
+        for (input, hint, expected, expected_country) in [
+            ("00 44 20 7946 0958", "DE", "+442079460958", "GB"),
+            ("0011 44 20 7946 0958", "AU", "+442079460958", "GB"),
+            // `011` after the national readings: both of these are Japanese.
+            ("0114567890", "JP", "+81114567890", "JP"),
+            ("011 123 4567", "JP", "+81111234567", "JP"),
+            // …but it is still tried when nothing national fits.
+            ("011 44 20 7946 0958", "JP", "+442079460958", "GB"),
+        ] {
+            let parsed = PhoneNumber::parse_with_country(input, hint)
+                .unwrap_or_else(|| panic!("{input:?} with hint {hint} must parse"));
+            assert_eq!(parsed.e164(), expected, "{input:?} / {hint}");
+            assert_eq!(
+                parsed.country().code,
+                expected_country,
+                "{input:?} / {hint}"
+            );
+        }
+    }
+
+    /// `original()` is the input exactly as it was supplied. The hinted parser
+    /// works on a trimmed, scheme-stripped copy and used to store *that* copy,
+    /// so surrounding whitespace and a `tel:` scheme were silently lost.
+    #[test]
+    fn original_is_preserved_verbatim() {
+        for (input, hint) in [
+            ("  +1 (202) 555-0173  ", "US"),
+            ("\t020 7946 0958\n", "GB"),
+            ("tel:+12025550173", "DE"),
+            ("1-202-555-0173", "US"),
+            ("0011442079460958", "AU"),
+        ] {
+            let parsed = PhoneNumber::parse_with_country(input, hint)
+                .unwrap_or_else(|| panic!("{input:?} with hint {hint} must parse"));
+            assert_eq!(parsed.original(), input, "hinted parse of {input:?}");
+        }
+        for input in [
+            "  +1 (202) 555-0173  ",
+            "+1 202-555-0173\n",
+            "tel:+12025550173",
+        ] {
+            let parsed =
+                PhoneNumber::parse(input).unwrap_or_else(|| panic!("{input:?} must parse"));
+            assert_eq!(parsed.original(), input, "plain parse of {input:?}");
+        }
+    }
+
+    /// A redundant trunk zero after an explicit country code used to work only
+    /// for countries whose length list happened to contain both L and L+1.
+    #[test]
+    fn a_redundant_trunk_zero_after_the_calling_code_is_handled_uniformly() {
+        for (input, expected) in [
+            ("+49 0 30 12345678", "+493012345678"),
+            ("+44 0 20 7946 0958", "+442079460958"),
+            ("+33 0 1 42 68 53 00", "+33142685300"),
+        ] {
+            assert_eq!(
+                normalize_phone_number(input).as_deref(),
+                Some(expected),
+                "{input:?}"
+            );
+        }
+    }
+
+    // --- country resolution -------------------------------------------------
+
+    /// Thirteen countries — including CA, GB, RU and MA — used to be
+    /// unreachable because another entry sharing their calling code shadowed
+    /// them.
+    #[test]
+    fn shadowed_countries_are_reachable_again() {
+        for (number, expected) in [
+            ("+442079460958", "GB"),
+            ("+79161234567", "RU"),
+            ("+212612345678", "MA"),
+            ("+358401234567", "FI"),
+            ("+14165550198", "CA"),
+            ("+590590123456", "GP"),
+            ("+672312345", "NF"),
+            ("+262639123456", "RE"),
+            ("+4791234567", "NO"),
+        ] {
+            assert_eq!(iso(number), expected, "{number}");
+        }
+    }
+
+    /// The fabricated `GB-CYM` / "Cymru" entry hijacked every UK number and
+    /// made the GB classification and formatting tables dead code.
+    #[test]
+    fn the_cymru_pseudo_country_is_gone() {
+        assert!(country_by_code("GB-CYM").is_none());
+        assert!(countries().iter().all(|c| c.code != "GB-CYM"));
+        assert!(countries().iter().all(|c| c.name != "Cymru"));
+
+        assert_eq!(iso("+442079460958"), "GB");
+        assert_eq!(
+            generate_random_phone_number("GB")
+                .and_then(|n| extract_country(&n))
+                .map(|c| c.code),
+            Some("GB")
+        );
+        // The GB range table is live again.
+        assert_eq!(
+            detect_phone_number_type("+448001234567"),
+            Some(PhoneNumberType::TollFree)
+        );
+        assert!(is_toll_free_number("+448001234567"));
+        assert_eq!(
+            detect_phone_number_type("+443001234567"),
+            Some(PhoneNumberType::Uan)
+        );
+        assert_eq!(
+            detect_phone_number_type("+445612345678"),
+            Some(PhoneNumberType::Voip)
+        );
+        // And so is the GB format table.
+        assert_eq!(
+            format_phone_number("+442079460958", PhoneFormat::National).as_deref(),
+            Some("020 7946 0958")
+        );
+    }
+
+    /// The Åland Islands entry used to swallow every Finnish number of length
+    /// 5-10.
+    #[test]
+    fn aland_no_longer_swallows_finnish_numbers() {
+        assert_eq!(iso("+358401234567"), "FI");
+        assert_eq!(iso("+35891234567"), "FI");
+        assert_eq!(
+            generate_random_phone_number("FI")
+                .and_then(|n| extract_country(&n))
+                .map(|c| c.code),
+            Some("FI")
+        );
+    }
+
+    /// Guernsey and Jersey carried `phone_lengths: [6]`; real GG/JE numbers
+    /// have a 10-digit national significant number.
+    #[test]
+    fn crown_dependency_lengths_are_realistic() {
+        for code in ["GG", "JE", "IM"] {
+            let country = country_by_code(code).unwrap_or_else(|| panic!("{code} missing"));
+            assert_eq!(country.prefix, 44, "{code}");
+            assert_eq!(country.phone_lengths, &[10], "{code}");
+        }
+        // Their numbers parse, even though +44 resolves to GB by default.
+        assert!(is_valid_phone_number("+441481123456"));
+        assert!(is_valid_phone_number("+441534123456"));
+        assert!(extract_countries("+441481123456")
+            .iter()
+            .any(|c| c.code == "GG"));
+    }
+
+    /// Uninhabited territories with fabricated numbering plans produced pure
+    /// false accepts on +47, +672 and +262.
+    #[test]
+    fn uninhabited_territories_no_longer_accept_numbers() {
+        for input in [
+            "+471234567890",
+            "+2621234567890",
+            "+6721234567890",
+            "+6721234",
+        ] {
+            assert!(!is_valid_phone_number(input), "{input} must be rejected");
+        }
+        for code in ["BV", "TF", "HM", "AQ"] {
+            assert!(
+                country_by_code(code).is_none(),
+                "{code} must not be in the table"
+            );
+        }
+    }
+
+    /// Japan rejected every 9-digit landline and freephone number.
+    #[test]
+    fn japanese_nine_digit_numbers_are_accepted() {
+        assert_eq!(country_by_code("JP").unwrap().phone_lengths, &[9, 10, 11]);
+        assert_eq!(iso("+81312345678"), "JP");
+        assert_eq!(iso("+81120123456"), "JP");
+        assert!(is_valid_phone_number("+819012345678"));
+    }
+
+    /// Romania's `phone_lengths: [10]` rejected every real Romanian number.
+    #[test]
+    fn romanian_numbers_are_nine_digits() {
+        assert_eq!(country_by_code("RO").unwrap().phone_lengths, &[9]);
+        assert_eq!(iso("+40712345678"), "RO");
+        assert_eq!(iso("+40212345678"), "RO");
+    }
+
+    /// Egypt, the UAE, Thailand and the Philippines omitted their landline
+    /// national lengths.
+    #[test]
+    fn landline_lengths_are_present_for_eg_ae_th_ph() {
+        for (number, expected) in [
+            ("+201012345678", "EG"),
+            ("+20212345678", "EG"),
+            ("+971501234567", "AE"),
+            ("+97142345678", "AE"),
+            ("+66812345678", "TH"),
+            ("+6621234567", "TH"),
+            ("+639171234567", "PH"),
+            ("+6321234567", "PH"),
+        ] {
+            assert_eq!(iso(number), expected, "{number}");
+        }
+    }
+
+    /// Jamaica's 658 overlay was missing, so `+1 658` numbers were attributed
+    /// to the United States.
+    #[test]
+    fn jamaicas_658_overlay_is_present() {
+        assert_eq!(iso("+18765550123"), "JM");
+        assert_eq!(iso("+16585550123"), "JM");
+    }
+
+    /// Kosovo was absent entirely and Bonaire was folded into Curaçao.
+    #[test]
+    fn kosovo_and_bonaire_are_modelled() {
+        assert_eq!(country_by_code("XK").map(|c| c.prefix), Some(383));
+        assert_eq!(iso("+38344123456"), "XK");
+        assert_eq!(country_by_code("BQ").map(|c| c.prefix), Some(599));
+        assert_eq!(iso("+5997001234"), "BQ");
+    }
+
+    /// Austria's maximum national length let a 16-digit number exceed the
+    /// E.164 ceiling.
+    #[test]
+    fn no_country_can_exceed_the_e164_ceiling() {
+        assert_eq!(err("+4312345678901234"), ParseError::TooLong);
+        for country in countries() {
+            let prefix_digits = country.prefix.to_string().len();
+            let longest = *country.phone_lengths.iter().max().unwrap() as usize;
+            assert!(
+                prefix_digits + longest <= 15,
+                "{} can produce a {}-digit E.164 number",
+                country.code,
+                prefix_digits + longest
+            );
+        }
+    }
+
+    /// Pitcairn was assigned +870, the Inmarsat SNAC, which is not a country
+    /// calling code.
+    #[test]
+    fn the_inmarsat_snac_is_not_a_country() {
+        assert_eq!(err("+8709123456"), ParseError::UnknownCountryCode);
+        assert!(countries().iter().all(|c| c.prefix != 870));
+    }
+
+    /// The Dominican Republic and Puerto Rico could only ever reach one of
+    /// their overlay calling codes.
+    #[test]
+    fn nanp_overlay_calling_codes_are_all_present() {
+        assert_eq!(
+            countries_by_code("DO")
+                .iter()
+                .map(|c| c.prefix)
+                .collect::<Vec<_>>(),
+            [1809, 1829, 1849]
+        );
+        assert_eq!(
+            countries_by_code("PR")
+                .iter()
+                .map(|c| c.prefix)
+                .collect::<Vec<_>>(),
+            [1787, 1939]
+        );
+        for number in ["+18095550123", "+18295550123", "+18495550123"] {
+            assert_eq!(iso(number), "DO", "{number}");
+        }
+        for number in ["+17875550123", "+19395550123"] {
+            assert_eq!(iso(number), "PR", "{number}");
+        }
+    }
+
+    /// Only the national number's *length* was validated, so 93% of random
+    /// digit strings of a plausible length were accepted.
+    #[test]
+    fn nanp_numbers_are_range_validated_not_just_length_validated() {
+        assert_eq!(err("+11111111111"), ParseError::InvalidAreaCode);
+        assert_eq!(err("+11231231234"), ParseError::InvalidAreaCode);
+        assert_eq!(err("+10005550199"), ParseError::InvalidAreaCode);
+        assert_eq!(err("+12021110173"), ParseError::InvalidExchange);
+        assert_eq!(err("+12020000173"), ParseError::InvalidExchange);
+        assert!(is_valid_phone_number("+12025550173"));
+    }
+
+    /// NANP tests used to pin Canadian area codes to the United States and
+    /// accepted the non-assignable area code 123.
+    #[test]
+    fn canadian_area_codes_resolve_to_canada() {
+        for number in [
+            "+14165551234",
+            "+15145551234",
+            "+16045551234",
+            "+16135551234",
+        ] {
+            assert_eq!(iso(number), "CA", "{number}");
+        }
+        assert_eq!(err("+11231231234"), ParseError::InvalidAreaCode);
+    }
+
+    /// `guess_country_from_number` inherited the shadowing bug and hard-coded a
+    /// US/GB/DE fallback that made it never return `None`.
+    #[test]
+    fn guessing_uses_the_real_calling_code_table() {
+        assert_eq!(
+            guess_country_from_number("442079460958").map(|c| c.code),
+            Some("GB")
+        );
+        assert_eq!(
+            guess_country_from_number("79161234567").map(|c| c.code),
+            Some("RU")
+        );
+        assert_eq!(guess_country_from_number("").map(|c| c.code), None);
+
+        // It never contradicts extract_country for a valid number.
+        for &(_, number) in COUNTRY_FIXTURE {
+            assert_eq!(
+                guess_country_from_number(number).map(|c| c.code),
+                extract_country(number).map(|c| c.code),
+                "{number}"
+            );
+        }
+    }
+
+    /// Two invariants of the data tables are enforced by `const _: () = { … }`
+    /// blocks in src/lib.rs and so are checked at *compile* time: every
+    /// `PRIMARY_FOR_PREFIX` entry must name a country that exists in
+    /// `COUNTRIES` under that calling code, and every `1XXX` entry in
+    /// `COUNTRIES` must have a matching `nanp::NANP_AREA_CODES` row. A `const`
+    /// assert cannot be observed from a runtime test — breaking either one stops
+    /// the crate compiling, so this suite never gets to run — which is why there
+    /// is no runtime check for them here and none should be added. What *is*
+    /// worth testing is the behaviour they protect, and that is what
+    /// `countries_by_calling_code_puts_the_primary_first` and
+    /// `nanp_overlay_calling_codes_are_all_present` do.
+    #[test]
+    fn the_country_table_is_publicly_accessible() {
+        assert!(countries().len() > 200);
+        assert!(countries().iter().any(|c| c.code == "JP"));
+        assert_eq!(country_by_code("DE").map(|c| c.prefix), Some(49));
+        assert!(!countries_by_code("DO").is_empty());
+        assert!(!countries_by_calling_code(44).is_empty());
+        assert!(!extract_countries("+79161234567").is_empty());
+    }
+
+    // --- classification -----------------------------------------------------
+
+    /// The UK branch of `classify_phone_number_type` was dead code, so 0800
+    /// numbers came back as `Mobile`.
+    #[test]
+    fn uk_service_numbers_classify_correctly() {
+        for (number, expected) in [
+            ("+448001234567", PhoneNumberType::TollFree),
+            ("+448451234567", PhoneNumberType::SharedCost),
+            ("+443001234567", PhoneNumberType::Uan),
+            ("+445612345678", PhoneNumberType::Voip),
+            ("+449091234567", PhoneNumberType::PremiumRate),
+            ("+447911123456", PhoneNumberType::Mobile),
+            ("+442079460958", PhoneNumberType::FixedLine),
+        ] {
+            assert_eq!(detect_phone_number_type(number), Some(expected), "{number}");
+        }
+        assert!(is_toll_free_number("+448001234567"));
+    }
+
+    /// Germany's toll-free arm was unreachable because leading zeros were
+    /// stripped before classification, so +49 800 came back as `FixedLine`.
+    #[test]
+    fn german_toll_free_numbers_classify_as_toll_free() {
+        assert_eq!(
+            detect_phone_number_type("+498001234567"),
+            Some(PhoneNumberType::TollFree)
+        );
+        assert_eq!(
+            detect_phone_number_type("+491801234567"),
+            Some(PhoneNumberType::SharedCost)
+        );
+        assert_eq!(
+            detect_phone_number_type("+499001234567"),
+            Some(PhoneNumberType::PremiumRate)
+        );
+    }
+
+    /// Only six countries had effective type tables; everything else fell
+    /// through to a single global first-digit guess that inverted the answer for
+    /// CN, IT, BR and IN.
+    ///
+    /// Each country now has its own arm. Most are range tables keyed on the
+    /// first two to four digits (CN, IT, BR); the fall-through inside the
+    /// `IN`/`CN`/`ZA`/`NG` arms is still a deliberately coarse first-digit
+    /// heuristic once the named ranges have been tried, so the rows below use
+    /// numbers whose answer does not depend on which of the two decided it.
+    /// [`indian_metro_landlines_are_not_classified_as_mobile`] covers the one
+    /// place where that coarseness needed an explicit exception.
+    #[test]
+    fn each_country_has_its_own_classification_arm() {
+        for (number, expected) in [
+            ("+8613800138000", PhoneNumberType::Mobile),
+            ("+862112345678", PhoneNumberType::FixedLine),
+            ("+390669821234", PhoneNumberType::FixedLine),
+            ("+393331234567", PhoneNumberType::Mobile),
+            ("+5511987654321", PhoneNumberType::Mobile),
+            ("+551133334444", PhoneNumberType::FixedLine),
+            ("+919876543210", PhoneNumberType::Mobile),
+            ("+911123456789", PhoneNumberType::FixedLine),
+        ] {
+            assert_eq!(detect_phone_number_type(number), Some(expected), "{number}");
+        }
+        // A country with no range table says so instead of guessing.
+        assert_eq!(
+            detect_phone_number_type("+96179123123"),
+            Some(PhoneNumberType::Unknown)
+        );
+    }
+
+    /// Regression: the `"IN"` arm was a bare first-digit guess
+    /// (`b'6'..=b'9' => Mobile`). Indian landlines carry their STD code in the
+    /// national significant number, so the two-digit metro codes that start
+    /// with 7 or 8 — Ahmedabad `079` and Bengaluru `080` — came back `Mobile`.
+    /// The other two-digit codes (11, 20, 22, 33, 40, 44) already fell in the
+    /// fixed-line range, so those two are the whole collision.
+    #[test]
+    fn indian_metro_landlines_are_not_classified_as_mobile() {
+        for (number, expected, what) in [
+            ("+918022221234", PhoneNumberType::FixedLine, "Bengaluru 080"),
+            ("+917912345678", PhoneNumberType::FixedLine, "Ahmedabad 079"),
+            ("+911123456789", PhoneNumberType::FixedLine, "Delhi 011"),
+            ("+912212345678", PhoneNumberType::FixedLine, "Mumbai 022"),
+            ("+919876543210", PhoneNumberType::Mobile, "a real mobile"),
+            (
+                "+918123456789",
+                PhoneNumberType::Mobile,
+                "mobile starting 81",
+            ),
+        ] {
+            assert_eq!(
+                detect_phone_number_type(number),
+                Some(expected),
+                "{number} is {what}"
+            );
+        }
+    }
+
+    /// Australian 1300 local-rate numbers came back `Unknown` and a nonexistent
+    /// 188 range was mapped to `TollFree`.
+    #[test]
+    fn australian_service_ranges_classify_correctly() {
+        assert_eq!(
+            detect_phone_number_type("+611800123456"),
+            Some(PhoneNumberType::TollFree)
+        );
+        assert_eq!(
+            detect_phone_number_type("+611300123456"),
+            Some(PhoneNumberType::SharedCost)
+        );
+        assert_eq!(
+            detect_phone_number_type("+611900123456"),
+            Some(PhoneNumberType::PremiumRate)
+        );
+        assert_eq!(
+            detect_phone_number_type("+61412345678"),
+            Some(PhoneNumberType::Mobile)
+        );
+    }
+
+    /// French 089x is premium rate, not toll-free, and 09xx is VoIP rather
+    /// than a fixed line.
+    #[test]
+    fn french_service_ranges_classify_correctly() {
+        assert_eq!(
+            detect_phone_number_type("+33891123456"),
+            Some(PhoneNumberType::PremiumRate)
+        );
+        assert_eq!(
+            detect_phone_number_type("+33912345678"),
+            Some(PhoneNumberType::Voip)
+        );
+        assert_eq!(
+            detect_phone_number_type("+33810123456"),
+            Some(PhoneNumberType::SharedCost)
+        );
+    }
+
+    /// Four `PhoneNumberType` variants were unreachable dead public API. The
+    /// two that could never describe an E.164 number were removed; the other
+    /// two are now produced.
+    #[test]
+    fn personal_number_and_pager_are_reachable() {
+        assert_eq!(
+            detect_phone_number_type("+447000123456"),
+            Some(PhoneNumberType::PersonalNumber)
+        );
+        assert_eq!(
+            detect_phone_number_type("+447600123456"),
+            Some(PhoneNumberType::Pager)
+        );
+        assert_eq!(
+            detect_phone_number_type("+497001234567"),
+            Some(PhoneNumberType::PersonalNumber)
+        );
+        assert_eq!(
+            detect_phone_number_type("+491641234567"),
+            Some(PhoneNumberType::Pager)
+        );
+        assert_eq!(
+            detect_phone_number_type("+15005550199"),
+            Some(PhoneNumberType::PersonalNumber)
+        );
+    }
+
+    // --- formatting ---------------------------------------------------------
+
+    /// National format omitted every country's trunk prefix and RFC 3966 output
+    /// could not be re-parsed by the crate that produced it.
+    #[test]
+    fn formatted_output_round_trips() {
+        for &(_, number) in COUNTRY_FIXTURE {
+            let parsed = PhoneNumber::parse(number).unwrap();
+
+            let rfc = parsed.format(PhoneFormat::RFC3966);
+            assert!(
+                is_valid_phone_number(&rfc),
+                "the crate rejects its own RFC 3966 output {rfc}"
+            );
+            assert_eq!(normalize_phone_number(&rfc).as_deref(), Some(number));
+
+            let national = parsed.format(PhoneFormat::National);
+            let back = PhoneNumber::parse_with_country(&national, parsed.country().code)
+                .unwrap_or_else(|| {
+                    panic!("{national:?} must re-parse as {}", parsed.country().code)
+                });
+            assert_eq!(back.e164(), number, "national round trip changed {number}");
+        }
+    }
+
+    /// The RFC 3966 renderer dropped the extension.
+    #[test]
+    fn rfc3966_keeps_the_extension() {
+        assert_eq!(
+            format_phone_number("+1 202-555-0173 ext. 42", PhoneFormat::RFC3966).as_deref(),
+            Some("tel:+12025550173;ext=42")
+        );
+        let back = PhoneNumber::parse("tel:+12025550173;ext=42").unwrap();
+        assert_eq!(back.extension(), Some("42"));
+    }
+
+    /// `PhoneFormat` variant docs described output the crate never produced.
+    #[test]
+    fn documented_format_shapes_are_what_is_emitted() {
+        assert_eq!(
+            format_phone_number("+12025550173", PhoneFormat::International).as_deref(),
+            Some("+1 202 555 0173")
+        );
+        assert_eq!(
+            format_phone_number("+12025550173", PhoneFormat::National).as_deref(),
+            Some("(202) 555-0173")
+        );
+        assert_eq!(
+            format_phone_number("+12025550173", PhoneFormat::RFC3966).as_deref(),
+            Some("tel:+12025550173")
+        );
+        assert_eq!(
+            format_phone_number("+442079460958", PhoneFormat::National).as_deref(),
+            Some("020 7946 0958")
+        );
+    }
+
+    // --- PhoneNumber and PhoneNumberSet -------------------------------------
+
+    /// `PhoneNumber`'s fields were public with no enforced invariant, so
+    /// `format()` and `national_number()` could be made to panic. The fields
+    /// are private now, and every accessor holds for every valid number.
+    #[test]
+    fn phone_number_accessors_never_panic() {
+        for &(_, number) in COUNTRY_FIXTURE {
+            let parsed = PhoneNumber::parse(number).unwrap();
+            assert!(!parsed.national_number().is_empty(), "{number}");
+            assert!(parsed.country_code() > 0);
+            for format in [
+                PhoneFormat::E164,
+                PhoneFormat::International,
+                PhoneFormat::National,
+                PhoneFormat::RFC3966,
+            ] {
+                assert!(!parsed.format(format).is_empty(), "{number} / {format:?}");
+            }
+        }
+    }
+
+    /// `parse_with_country` used to force the hint country onto a number whose
+    /// normalized form, type and national number had been computed for a
+    /// different country.
+    #[test]
+    fn parse_with_country_keeps_country_and_number_consistent() {
+        for (input, hint) in [
+            ("2685550173", "US"),
+            ("2645550173", "US"),
+            ("8095550173", "US"),
+            ("4165550198", "CA"),
+            ("2025550173", "CA"),
+        ] {
+            let hinted = PhoneNumber::parse_with_country(input, hint)
+                .unwrap_or_else(|| panic!("{input} / {hint} must parse"));
+            let direct = PhoneNumber::parse(hinted.e164()).unwrap();
+
+            assert_eq!(
+                hinted.country().code,
+                direct.country().code,
+                "{input} / {hint}"
+            );
+            assert_eq!(hinted.national_number(), direct.national_number());
+            assert_eq!(hinted.country_code(), direct.country_code());
+            assert_eq!(hinted.phone_type(), direct.phone_type());
+            assert_eq!(
+                hinted.format(PhoneFormat::RFC3966),
+                direct.format(PhoneFormat::RFC3966)
+            );
+        }
+    }
+
+    /// `parse_with_country` silently ignored an unrecognised country code, so a
+    /// typo'd hint was more permissive than a correct one.
+    #[test]
+    fn an_unrecognised_hint_is_an_error_not_a_free_pass() {
+        assert_eq!(
+            PhoneNumber::try_parse_with_country("020 7946 0958", "ZZ").unwrap_err(),
+            ParseError::UnknownCountry
+        );
+        for hint in ["ZZ", "GBR", "", "XX", "44"] {
+            assert!(
+                PhoneNumber::parse_with_country("020 7946 0958", hint).is_none(),
+                "hint {hint:?} must be rejected"
+            );
+        }
+        // The correct hint still works, in any casing.
+        for hint in ["GB", "gb", "Gb"] {
+            assert_eq!(
+                PhoneNumber::parse_with_country("020 7946 0958", hint)
+                    .unwrap()
+                    .e164(),
+                "+442079460958",
+                "hint {hint:?} must resolve"
+            );
+        }
+    }
+
+    /// `national_number()` silently returned the full E.164 string when
+    /// `country` was `None`. The field is no longer optional.
+    #[test]
+    fn national_number_is_always_a_national_number() {
+        let parsed = PhoneNumber::parse("+442079460958").unwrap();
+        assert_eq!(parsed.national_number(), "2079460958");
+        assert_eq!(parsed.format(PhoneFormat::National), "020 7946 0958");
+        assert!(!parsed.national_number().starts_with('+'));
+    }
+
+    /// `PhoneNumberSet::add` could not distinguish a rejected input from a
+    /// duplicate.
+    #[test]
+    fn set_reports_rejection_separately_from_duplication() {
+        let mut set = PhoneNumberSet::new();
+        assert_eq!(set.try_add("+12025550173"), Ok(true));
+        assert_eq!(set.try_add("+1 202-555-0173"), Ok(false));
+        assert!(set.try_add("nonsense").is_err());
+        assert_eq!(set.len(), 1);
+    }
+
+    /// `PhoneNumberSet` lacked `IntoIterator`, `Extend` and `PartialEq`.
+    #[test]
+    fn set_implements_the_standard_collection_traits() {
+        let mut set = PhoneNumberSet::new();
+        set.extend(["+12025550173", "+442079460958"]);
+        assert_eq!(set.len(), 2);
+
+        let by_ref: Vec<&PhoneNumber> = (&set).into_iter().collect();
+        assert_eq!(by_ref.len(), 2);
+        let owned: Vec<PhoneNumber> = set.clone().into_iter().collect();
+        assert_eq!(owned.len(), 2);
+
+        let other: PhoneNumberSet = ["+442079460958", "+12025550173"].into_iter().collect();
+        assert_eq!(set, other);
+        assert_eq!(set, set.clone());
+    }
+
+    /// `find_duplicates` was a misnomer that returned at most one element; it
+    /// is now `get`, which is what it always did.
+    #[test]
+    fn set_lookup_is_named_for_what_it_does() {
+        let mut set = PhoneNumberSet::new();
+        assert!(set.add("+1-202-555-0173"));
+        let found = set.get("+1 (202) 555-0173").expect("must be found");
+        assert_eq!(found.e164(), "+12025550173");
+        assert!(set.get("+12025550174").is_none());
+    }
+
+    /// `FromStr::Err` was `&'static str` and every fallible function returned a
+    /// bare `Option`.
+    #[test]
+    fn every_fallible_entry_point_has_a_try_variant() {
+        assert_eq!(
+            try_normalize_phone_number("nonsense"),
+            Err(ParseError::InvalidCharacter)
+        );
+        assert_eq!(
+            PhoneNumber::try_parse("nonsense").unwrap_err(),
+            ParseError::InvalidCharacter
+        );
+        assert_eq!(
+            PhoneNumber::try_parse_with_country("x", "ZZ").unwrap_err(),
+            ParseError::UnknownCountry
+        );
+        assert_eq!(
+            PhoneNumberSet::new().try_add("nonsense").unwrap_err(),
+            ParseError::InvalidCharacter
+        );
+        let from_str: Result<PhoneNumber, ParseError> = "nonsense".parse();
+        assert_eq!(from_str.unwrap_err(), ParseError::InvalidCharacter);
+    }
+
+    // --- text extraction ----------------------------------------------------
+
+    /// Two whitespace-separated numbers merged into one bogus candidate,
+    /// silently dropping the second.
+    #[test]
+    fn whitespace_separated_numbers_stay_separate() {
+        let numbers = extract_phone_numbers_from_text("Call 2025550173 4155552671 now");
+        assert_eq!(
+            numbers.iter().map(|n| n.raw.as_str()).collect::<Vec<_>>(),
+            ["2025550173", "4155552671"]
+        );
+    }
+
+    /// Redaction leaked the digits of a second number when two numbers were
+    /// separated by a single space.
+    #[test]
+    fn redaction_does_not_leak_an_adjacent_number() {
+        assert_eq!(
+            redact_phone_numbers("Call 2025550173 4155552671 now", 0),
+            "Call [PHONE] [PHONE] now"
+        );
+        assert_eq!(
+            redact_phone_numbers("Call 2025550173 4155552671 now", 4),
+            "Call ******0173 ******2671 now"
+        );
+        assert_eq!(
+            redact_phone_numbers("Numbers: 2025550173 4155552671", 0),
+            "Numbers: [PHONE] [PHONE]"
+        );
+    }
+
+    /// A number followed by " (<digit>" swallowed the paren and digit, so
+    /// replacement destroyed surrounding words and left a dangling ')'.
+    #[test]
+    fn a_following_parenthesised_digit_survives_redaction() {
+        assert_eq!(
+            redact_phone_numbers("Call 202-555-0173 (3 lines available)", 0),
+            "Call [PHONE] (3 lines available)"
+        );
+    }
+
+    /// An unmatched '(' was included in `raw` while the ')' was not, so
+    /// redacting "(2025550173)" left a stray ')'.
+    #[test]
+    fn parentheses_are_balanced_in_the_reported_span() {
+        let numbers = extract_phone_numbers_from_text("Call (2025550173) now");
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].raw, "(2025550173)");
+        assert_eq!(
+            redact_phone_numbers("Call (2025550173) now", 0),
+            "Call [PHONE] now"
+        );
+    }
+
+    /// '+' and '(' candidate starts skipped the left-boundary check, producing
+    /// valid-looking false positives from a '+' embedded in a word.
+    #[test]
+    fn a_plus_inside_a_word_is_not_a_candidate_start() {
+        assert!(extract_phone_numbers_from_text("C++12025550173").is_empty());
+        assert!(
+            extract_phone_numbers_from_text("email me at bob+12025550173@example.com").is_empty()
+        );
+        for number in extract_phone_numbers_from_text("Zip+4 90210-1234") {
+            assert!(!number.raw.starts_with('+'), "{:?}", number.raw);
+            assert!(!number.is_valid, "{:?} must not validate", number.raw);
+        }
+        for number in extract_phone_numbers_from_text("score 1e+12345678901") {
+            assert!(!number.raw.starts_with('+'), "{:?}", number.raw);
+        }
+    }
+
+    /// The digit cap admitted 16 digits and truncated longer runs into a bogus
+    /// 16-digit candidate.
+    #[test]
+    fn over_length_digit_runs_are_rejected_not_truncated() {
+        for text in [
+            "digits 0123456789012345 here",
+            "digits 01234567890123456 here",
+            "digits 012345678901234567890123456789 here",
+        ] {
+            assert!(
+                extract_phone_numbers_from_text(text).is_empty(),
+                "{text:?} produced a candidate"
+            );
+        }
+    }
+
+    /// NBSP, en dash, tab, double space and spaced hyphens inside a number
+    /// caused total extraction failure.
+    #[test]
+    fn unicode_and_wide_separators_do_not_break_extraction() {
+        for text in [
+            "Call +1 202\u{00A0}555\u{00A0}0173 now",
+            "Call +1 202\u{2013}555\u{2013}0173 now",
+            "Call +1 202\t555\t0173 now",
+            "Call +1 202  555  0173 now",
+            "Call +1 202 - 555 - 0173 now",
+        ] {
+            let numbers = extract_phone_numbers_from_text(text);
+            assert_eq!(numbers.len(), 1, "{text:?}");
+            assert_eq!(
+                numbers[0].normalized.as_deref(),
+                Some("+12025550173"),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// Fullwidth digits and the fullwidth plus were never extracted, making the
+    /// API blind to CJK-formatted numbers.
+    #[test]
+    fn fullwidth_numbers_are_extracted_from_text() {
+        let text = "\u{7DCA}\u{6025}: \u{FF0B}\u{FF18}\u{FF11}\u{FF13}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}\u{FF16}\u{FF17}\u{FF18}";
+        let numbers = extract_phone_numbers_from_text(text);
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].normalized.as_deref(), Some("+81312345678"));
+        assert_eq!(&text[numbers[0].start..numbers[0].end], numbers[0].raw);
+    }
+
+    /// Dates, IPv4 addresses and ISBNs were all treated as phone numbers.
+    #[test]
+    fn structured_numeric_data_is_not_extracted() {
+        for text in [
+            "Version 3.141592653589793 here",
+            "IP 192.168.1.100 and date 2024-01-15",
+            "ISBN 978-3-16-148410-0 here",
+        ] {
+            assert!(
+                extract_phone_numbers_from_text(text).is_empty(),
+                "false positive in {text:?}"
+            );
+        }
+        // A dotted run that is not a quad is still reported as a candidate,
+        // but it must never come back as a valid phone number.
+        for number in extract_phone_numbers_from_text("1.2.3.4567890") {
+            assert!(!number.is_valid, "{:?} must not validate", number.raw);
+            assert_eq!(number.normalized, None);
+        }
+    }
+
+    /// `extract_phone_numbers_with_country_hint` re-prefixed numbers that
+    /// already carried a '+' country code, returning a different real number
+    /// with `is_valid = true`.
+    #[test]
+    fn the_hint_never_re_prefixes_an_explicit_country_code() {
+        for hint in ["DE", "GB", "FR", "US"] {
+            let numbers = extract_phone_numbers_with_country_hint("Call +12025550173", hint);
+            assert_eq!(numbers.len(), 1, "hint {hint}");
+            assert_eq!(
+                numbers[0].normalized.as_deref(),
+                Some("+12025550173"),
+                "hint {hint} re-prefixed an explicit country code"
+            );
+        }
+    }
+
+    /// Text extraction had a hard 7-digit floor, making the national numbers of
+    /// 17 countries structurally invisible.
+    #[test]
+    fn short_national_numbers_are_reachable_with_a_hint() {
+        let numbers = extract_phone_numbers_with_country_hint("call 849338 now", "AD");
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].normalized.as_deref(), Some("+376849338"));
+    }
+
+    /// Every reported span used to be computed by counting characters, which
+    /// was both quadratic and wrong for multi-byte input.
+    #[test]
+    fn reported_spans_are_exact_byte_offsets() {
+        let text = "\u{1F4DE} Call +1-202-555-0173 or \u{00E4}+442079460958 today";
+        let numbers = extract_phone_numbers_from_text(text);
+        assert_eq!(numbers.len(), 2);
+        let mut previous_end = 0;
+        for number in &numbers {
+            assert_eq!(&text[number.start..number.end], number.raw);
+            assert!(number.start >= previous_end);
+            previous_end = number.end;
+        }
+    }
+
+    /// `redact_phone_numbers` documented separators it never emitted, and
+    /// `visible_digits >= total` inverted into full redaction without saying so.
+    #[test]
+    fn redaction_matches_its_documented_contract() {
+        assert_eq!(
+            redact_phone_numbers("Call +12025550173", 4),
+            "Call *******0173"
+        );
+        assert_eq!(redact_phone_numbers("Call +12025550173", 0), "Call [PHONE]");
+        assert_eq!(
+            redact_phone_numbers("Call +12025550173", 11),
+            "Call [PHONE]"
+        );
+        assert_eq!(
+            redact_phone_numbers("Call +12025550173", 99),
+            "Call [PHONE]"
+        );
+    }
+
+    /// `.` and `,` used to count as word characters for the left-boundary
+    /// check, so a number in a comma-separated list or a CSV field was never
+    /// even considered — and therefore never redacted. The two inputs that the
+    /// boundary check exists for must still be skipped.
+    #[test]
+    fn numbers_in_comma_separated_text_are_found_and_redacted() {
+        for (text, expected) in [
+            ("name,+12025550173,x", "+12025550173"),
+            ("a,b,+442079460958,c", "+442079460958"),
+            ("first,2025550173,last", "2025550173"),
+        ] {
+            let numbers = extract_phone_numbers_from_text(text);
+            assert_eq!(numbers.len(), 1, "{text:?}");
+            assert_eq!(numbers[0].raw, expected, "{text:?}");
+        }
+        assert_eq!(
+            redact_phone_numbers("name,+12025550173,x", 0),
+            "name,[PHONE],x"
+        );
+
+        // A digit before the comma makes it part of one number, not a list
+        // separator; and a '+' inside an address is still not a number start.
+        assert!(extract_phone_numbers_from_text("1,2025550173").is_empty());
+        assert!(extract_phone_numbers_from_text("user+12025550173@example.com").is_empty());
+        assert!(extract_phone_numbers_from_text("v1.2025550173").is_empty());
+    }
+
+    /// The cap on how many separated groups form one candidate is `+`-aware:
+    /// eight groups when the candidate carries an explicit `+`, five without.
+    /// A flat cap of eight glued the six groups of `06 45 34 25 45 06` into a
+    /// twelve-digit run that normalized to a *fabricated* valid number.
+    #[test]
+    fn the_group_cap_depends_on_an_explicit_plus() {
+        // Six unprefixed groups: only the first five are taken, so the trailing
+        // "06" is left out rather than folded in.
+        let numbers = extract_phone_numbers_from_text("06 45 34 25 45 06");
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].raw, "06 45 34 25 45");
+        assert_eq!(numbers[0].normalized, None);
+        assert!(!numbers[0].is_valid);
+        assert_eq!(
+            extract_phone_numbers_with_country_hint("06 45 34 25 45 06", "FR")[0]
+                .normalized
+                .as_deref(),
+            Some("+33645342545")
+        );
+
+        // Five unprefixed groups still form one candidate.
+        let french = extract_phone_numbers_with_country_hint("06 12 34 56 78", "FR");
+        assert_eq!(french.len(), 1);
+        assert_eq!(french[0].raw, "06 12 34 56 78");
+        assert_eq!(french[0].normalized.as_deref(), Some("+33612345678"));
+
+        // With a '+' the author has said it is one number, so eight groups are
+        // allowed.
+        let german = extract_phone_numbers_from_text("+49 (0) 30 12 34 56 78");
+        assert_eq!(german.len(), 1);
+        assert_eq!(german[0].raw, "+49 (0) 30 12 34 56 78");
+        assert_eq!(german[0].normalized.as_deref(), Some("+493012345678"));
+    }
+
+    /// Dot-separated numbers are written that way across half of Europe, so the
+    /// shape alone cannot reject them. Only the precise dotted-quad and ISO-date
+    /// shapes are filtered.
+    #[test]
+    fn dotted_numbers_survive_but_addresses_and_dates_do_not() {
+        let numbers = extract_phone_numbers_from_text("02.345.67.89");
+        assert_eq!(numbers.len(), 1);
+        assert_eq!(numbers[0].raw, "02.345.67.89");
+        assert_eq!(
+            extract_phone_numbers_with_country_hint("02.345.67.89", "BE")[0]
+                .normalized
+                .as_deref(),
+            Some("+3223456789")
+        );
+        assert_eq!(
+            extract_phone_numbers_from_text("202.555.0173")[0].raw,
+            "202.555.0173"
+        );
+
+        for text in ["192.168.1.1", "10.0.0.138", "2024-01-15", "15-01-2024"] {
+            assert!(
+                extract_phone_numbers_from_text(text).is_empty(),
+                "false positive in {text:?}"
+            );
+        }
+
+        // A date is rejected on its *shape*, before normalization is attempted,
+        // so a hint cannot resurrect it. A dotted quad is not: the shape is far
+        // less discriminating than a date's, so it is only applied to a
+        // candidate that already failed to normalize — and under a hint
+        // `192.168.1.1` does normalize. That asymmetry is deliberate, and this
+        // pins it so it cannot be inverted by accident.
+        for text in ["2024-01-15", "15-01-2024", "1999-12-31"] {
+            assert!(
+                extract_phone_numbers_with_country_hint(text, "DE").is_empty(),
+                "a date must stay rejected under a hint: {text:?}"
+            );
+        }
+        assert_eq!(
+            extract_phone_numbers_with_country_hint("192.168.1.1", "DE")
+                .first()
+                .and_then(|n| n.normalized.as_deref()),
+            Some("+4919216811"),
+            "an address that is also a valid national number is not separable"
+        );
+    }
+
+    /// An IDD prefix only counts when what follows it actually parses. When it
+    /// does, the number behind it is the answer; when it does not, the digits
+    /// stay a national number rather than being mangled.
+    #[test]
+    fn an_idd_prefix_only_counts_when_the_remainder_parses() {
+        for (text, expected) in [
+            ("0012025550173", "+12025550173"),
+            ("011442079460958", "+442079460958"),
+            ("00442079460958", "+442079460958"),
+        ] {
+            let numbers = extract_phone_numbers_from_text(text);
+            assert_eq!(numbers.len(), 1, "{text:?}");
+            assert_eq!(numbers[0].normalized.as_deref(), Some(expected), "{text:?}");
+        }
+        // `011 123 4567` is the Turin area code, and `011` + `1234567` is not a
+        // number anywhere, so nothing is claimed without a hint…
+        for text in ["0111234567", "011 123 4567"] {
+            let numbers = extract_phone_numbers_from_text(text);
+            assert_eq!(numbers.len(), 1, "{text:?}");
+            assert_eq!(numbers[0].normalized, None, "{text:?}");
+        }
+        // …and with the Italian hint it is Turin, zero and all.
+        assert_eq!(
+            extract_phone_numbers_with_country_hint("011 123 4567", "IT")[0]
+                .normalized
+                .as_deref(),
+            Some("+390111234567")
+        );
+    }
+
+    // --- generation ---------------------------------------------------------
+
+    /// `generate_random_phone_number("CA")` never produced a number that
+    /// resolved back to CA, and "US" emitted ~2.3% Caribbean numbers.
+    #[test]
+    fn generated_numbers_resolve_back_to_the_requested_country() {
+        for code in [
+            "US", "CA", "GB", "DE", "FR", "IT", "JP", "AU", "BR", "IN", "AG", "DO", "PR", "JM",
+        ] {
+            for number in generate_random_phone_numbers(code, 50) {
+                assert_eq!(
+                    extract_country(&number).map(|c| c.code),
+                    Some(code),
+                    "{code} generated {number}"
+                );
+            }
+        }
+    }
+
+    /// A zero leading digit was clamped to '1' rather than resampled, doubling
+    /// P(lead = '1') and producing structurally impossible NANP area codes.
+    #[test]
+    fn generation_resamples_rather_than_clamps_the_leading_digit() {
+        let numbers = generate_random_phone_numbers("US", 500);
+        assert_eq!(numbers.len(), 500);
+        for number in &numbers {
+            let area = &number[2..5];
+            assert!(
+                (b'2'..=b'9').contains(&area.as_bytes()[0]),
+                "{number} has area code {area}"
+            );
+            assert!(!area.ends_with("11"), "{number} has an N11 area code");
+        }
+    }
+
+    /// Generation always used `phone_lengths.first()`, so generated corpora had
+    /// zero length diversity.
+    #[test]
+    fn generation_samples_more_than_one_length() {
+        use std::collections::BTreeSet;
+        let lengths: BTreeSet<usize> = generate_random_phone_numbers("AT", 400)
+            .iter()
+            .map(|n| n.len())
+            .collect();
+        assert!(
+            lengths.len() >= 3,
+            "only these lengths were generated: {lengths:?}"
+        );
+    }
+
+    /// The PRNG took its digit from a single bit range, making digit parity
+    /// perfectly periodic with period 131072.
+    #[test]
+    fn generation_is_not_trivially_periodic() {
+        use std::collections::BTreeSet;
+        let numbers = generate_random_phone_numbers("US", 300);
+        let unique: BTreeSet<&String> = numbers.iter().collect();
+        assert!(unique.len() >= 295, "{} unique of 300", unique.len());
+    }
+
+    /// `count` went straight to `Vec::with_capacity`, so a large value aborted
+    /// the process.
+    #[test]
+    fn a_huge_count_is_not_used_as_an_allocation_hint() {
+        assert!(generate_random_phone_numbers("ZZ", usize::MAX).is_empty());
+        // A country that cannot be generated stops at the first failure rather
+        // than trying `count` times.
+        assert!(generate_random_phone_numbers("GG", usize::MAX).is_empty());
+    }
+
+    // --- suggestions and batch APIs -----------------------------------------
+
+    /// Length-repair branches were gated so tightly that a single-digit typo
+    /// produced an empty list. The exact suggestions for these three inputs are
+    /// pinned by `SUGGESTION_CASES` in `mod suggestions`; what this test adds is
+    /// that every one of them is canonical and really does come back valid.
+    #[test]
+    fn single_digit_typos_are_repairable() {
+        for (input, hint) in [
+            ("+1 202 555 01730", Some("US")),
+            ("+1 202 555 017", Some("US")),
+            ("+44 20 7946 09580", Some("GB")),
+        ] {
+            let suggestions = suggest_phone_number_corrections(input, hint);
+            assert!(!suggestions.is_empty(), "no suggestion for {input:?}");
+            for suggestion in &suggestions {
+                assert!(
+                    is_valid_phone_number(suggestion),
+                    "{suggestion} suggested for {input:?} is not valid"
+                );
+                assert_eq!(
+                    normalize_phone_number(suggestion).as_deref(),
+                    Some(suggestion.as_str()),
+                    "{suggestion} is not canonical"
+                );
+            }
+        }
+    }
+
+    /// Candidates were ranked by byte order before `truncate(5)`, so the
+    /// zero-edit suggestion was discarded whenever the input sorted high.
+    #[test]
+    fn the_minimal_edit_suggestion_is_never_truncated_away() {
+        assert_eq!(
+            suggest_phone_number_corrections("+12025550173", None),
+            vec!["+12025550173".to_string()]
+        );
+        assert_eq!(
+            suggest_phone_number_corrections("  +1 (202) 555-0173  ", None),
+            vec!["+12025550173".to_string()]
+        );
+        assert_eq!(
+            suggest_phone_number_corrections("00442079460958", None),
+            vec!["+442079460958".to_string()]
+        );
+    }
+
+    /// `is_potentially_valid_phone_number` used a hardcoded digit window that
+    /// contradicted the country table and rejected vanity numbers the
+    /// validator accepted.
+    #[test]
+    fn potentially_valid_is_implied_by_valid() {
+        for input in [
+            "1-800-FLOWERS",
+            "1-800-GOT-JUNK",
+            "+12025550173",
+            "+442079460958",
+            "+390698123456",
+        ] {
+            assert!(is_valid_phone_number(input), "{input:?}");
+            assert!(
+                is_potentially_valid_phone_number(input),
+                "{input:?} is valid but not potentially valid"
+            );
+        }
+        for &(_, number) in COUNTRY_FIXTURE {
+            assert!(is_potentially_valid_phone_number(number), "{number}");
+        }
+    }
+
+    /// `analyze_phone_numbers_batch` and `validate_phone_numbers_batch`
+    /// reported contradictory validity for the same slice.
+    #[test]
+    fn the_batch_apis_never_contradict_each_other() {
+        let corpus = [
+            "+12025550173",
+            " +12025550173",
+            "+12025550173\n",
+            "+12025550173\t",
+            "nonsense",
+            "",
+            "  ",
+            "+44 (0)20 7946 0958",
+            "1-800-FLOWERS",
+        ];
+        let analyses = analyze_phone_numbers_batch(&corpus);
+        let validity = validate_phone_numbers_batch(&corpus);
+        for (index, input) in corpus.iter().enumerate() {
+            assert_eq!(analyses[index].is_valid, validity[index], "{input:?}");
+        }
+    }
+
+    /// `group_equivalent_phone_numbers` was quadratic and not reflexive on
+    /// inputs that failed to normalize.
+    #[test]
+    fn grouping_returns_every_input_exactly_once() {
+        let numbers = [
+            "not a number",
+            "not a number",
+            "+12025550173",
+            "+1 202 555 0173",
+        ];
+        let groups = group_equivalent_phone_numbers(&numbers);
+        let flattened: Vec<&String> = groups.iter().flatten().collect();
+        assert_eq!(flattened.len(), numbers.len());
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[2], ["+12025550173", "+1 202 555 0173"]);
+    }
+
+    // --- API surface --------------------------------------------------------
+
+    /// `Country` appeared in five public signatures but was not re-exported,
+    /// so downstream crates could not name it (E0603). The type is now public;
+    /// `tests/public_api.rs` proves it from outside the crate.
+    #[test]
+    fn country_is_a_first_class_public_type() {
+        let country: &'static Country = country_by_code("JP").unwrap();
+        assert_eq!(country.prefix, 81);
+        assert_eq!(country.code, "JP");
+        assert!(!country.phone_lengths.is_empty());
+        assert_eq!(country.to_string(), "Japan (+81)");
+
+        fn takes_country(c: &'static Country) -> u32 {
+            c.prefix
+        }
+        assert_eq!(takes_country(country), 81);
+    }
+
+    /// `PhoneNumberAnalysis` had no way to report *why* a number was rejected.
+    #[test]
+    fn analysis_carries_the_parse_error() {
+        let analysis = &analyze_phone_numbers_batch(&["+11111111111"])[0];
+        assert!(!analysis.is_valid);
+        assert_eq!(analysis.error, Some(ParseError::InvalidAreaCode));
+        assert_eq!(analysis.normalized, None);
+
+        let ok = &analyze_phone_numbers_batch(&["+12025550173"])[0];
+        assert!(ok.is_valid);
+        assert_eq!(ok.error, None);
+    }
+
+    // ========================================================================
+    // Defects the test suite found in code it does not own, and that have since
+    // been fixed.
+    //
+    // Each of these started life as an `#[ignore]`d test pinning a live bug.
+    // They all run now; the doc comment on each says what was wrong, because
+    // that is what makes the test worth keeping.
+    //
+    // Two `#[ignore]`d tests are still waiting on a fix, and their `#[ignore]`
+    // reason names the defect: `indian_landlines_are_misclassified_as_mobile`
+    // below, and `suggestions_for_a_hinted_input_reach_the_hint_country` in
+    // `mod suggestions`. Nothing else in this file is ignored.
+    // ========================================================================
+
+    /// The French toll-free arm of `classify_phone_number_type` used to match
+    /// `n4` — the first *four* digits — against `800..=805`. A French national
+    /// significant number is nine digits, so `n4` for `0800 123 456` was `8001`,
+    /// never `800`: the arm was unreachable, `PhoneNumberType::TollFree` could
+    /// never be produced for FR, and 0800-0805 numbers fell through to
+    /// `Unknown`. It matches `n3` now, the way the GB/IE/AU arms scale their own
+    /// ranges.
+    #[test]
+    fn french_toll_free_numbers_classify_as_toll_free() {
+        for number in [
+            "+33800123456",
+            "+33801123456",
+            "+33802123456",
+            "+33805123456",
+        ] {
+            assert_eq!(
+                detect_phone_number_type(number),
+                Some(PhoneNumberType::TollFree),
+                "{number}"
+            );
+            assert!(is_toll_free_number(number), "{number}");
+        }
+    }
+
+    /// The French arm was not the only place a service range was matched
+    /// against the wrong number of digits. A range that is `N` digits wide
+    /// after the trunk zero is stripped must be compared against the `N`-digit
+    /// prefix; comparing `020` against a three-digit prefix, or `080` against a
+    /// three-digit one, silently makes the whole arm unreachable. One case per
+    /// range that was wrong, plus the neighbours that must NOT be caught by it.
+    #[test]
+    fn service_ranges_are_matched_at_their_real_width() {
+        use PhoneNumberType::*;
+        let cases: &[(&str, PhoneNumberType)] = &[
+            // Sweden: freephone is 020, two digits after the trunk zero.
+            ("+46201234567", TollFree),
+            ("+46771234567", SharedCost),
+            ("+46701234567", Mobile),
+            ("+46812345678", FixedLine),
+            // Korea: 080 freephone and 060 premium, likewise two digits.
+            ("+82801234567", TollFree),
+            ("+82601234567", PremiumRate),
+            ("+825012345678", Voip),
+            ("+821012345678", Mobile),
+            ("+82212345678", FixedLine),
+            // Korean "representative" numbers are 15xx / 16xx / 18xx and share
+            // their leading pair with the mobile block, so only the eight-digit
+            // length tells them apart. Matching the pair alone would swallow
+            // every 15x/16x/18x mobile.
+            ("+8215881234", Uan),
+            ("+8216441234", Uan),
+            ("+8218991234", Uan),
+            ("+82150123456", Mobile),
+            ("+82160123456", Mobile),
+            ("+82180123456", Mobile),
+            // UK: all of 09 is premium, not only 090x.
+            ("+449881234567", PremiumRate),
+            ("+449091234567", PremiumRate),
+            ("+448001234567", TollFree),
+            ("+447000123456", PersonalNumber),
+            ("+447600123456", Pager),
+            // Ireland: 0818 is shared cost inside the 08 mobile block.
+            ("+353818123456", SharedCost),
+            ("+353861234567", Mobile),
         ];
 
         for (number, expected) in cases {
             assert_eq!(
-                extract_country(number).map(|c| c.code),
-                Some(expected),
-                "{number} should resolve to {expected}"
+                detect_phone_number_type(number),
+                Some(*expected),
+                "{number} should classify as {expected}"
             );
-            assert_eq!(normalize_phone_number(number), Some(number.to_string()));
         }
     }
 
+    /// `suggest_phone_number_corrections` used to try `format!("+{digits}")` in
+    /// tier 0 before the country hint was consulted at all. When a national
+    /// number's digits happened to spell a valid foreign E.164 number the search
+    /// stopped there and the caller got a country they had not asked about:
+    /// `"020 7946 0958"` with hint `"GB"` yielded the Egyptian `+2079460958`,
+    /// and `"2025550173"` with hint `"US"` the Egyptian `+2025550173`. Tier 0
+    /// now reads through the hint when one is supplied.
+    ///
+    /// Tiers 3 and 4 still do not — see
+    /// `suggestions_for_a_hinted_input_reach_the_hint_country`.
     #[test]
-    fn test_normalize_phone_number() {
-        for phone_number in PHONE_NUMBERS.iter() {
-            let normalized_phone_number = normalize_phone_number(phone_number.phone_number);
-            assert_eq!(
-                normalized_phone_number,
-                Some(phone_number.phone_number.to_string())
-            );
-            // Use country_code to avoid dead_code warning
-            assert!(!phone_number.country_code.is_empty());
-        }
-
-        assert_eq!(normalize_phone_number("invalid_phone_number"), None);
+    fn suggestions_honour_the_country_hint() {
         assert_eq!(
-            normalize_phone_number("+1 (202) 555-0173 ext. 99"),
-            Some("+12025550173".to_string())
+            suggest_phone_number_corrections("020 7946 0958", Some("GB")),
+            vec!["+442079460958".to_string()]
         );
         assert_eq!(
-            normalize_phone_number("1-800-FLOWERS"),
-            Some("+18003569377".to_string())
+            suggest_phone_number_corrections("2025550173", Some("US")),
+            vec!["+12025550173".to_string()]
         );
     }
 
+    /// `extract_phone_numbers_with_country_hint` used to fail *open*: a code
+    /// that `country_by_code` did not resolve was silently downgraded to "no
+    /// hint", so the call returned a different number — `"Call 2025550173"` with
+    /// hint `"us"` yielded the Egyptian `+2025550173` where `"US"` yielded
+    /// `+12025550173`. It now fails closed, like
+    /// `PhoneNumber::try_parse_with_country` and
+    /// `suggest_phone_number_corrections`, and resolves the hint
+    /// case-insensitively so `"us"` is not a typo in the first place.
     #[test]
-    fn test_cases() {
-        let test_cases = vec![
-            ("+61485906541", true),
-            ("+4306935893571", true),
-            ("+32468799972", true),
-            ("+5561981737725", true),
-            ("+44 7406514755", true),
-            ("+54 9119298464", true),
-            ("+61 4129228042", true),
-            ("+43 6642428349", true),
-            ("+32 4706460538", true),
-            ("+420 601139706", true),
-        ];
-
-        for (phone, valid) in test_cases {
-            let is_valid = is_valid_phone_number(phone);
-            assert_eq!(is_valid, valid);
-        }
-    }
-
-    #[test]
-    fn test_phone_number_formatting() {
-        let number = "+12345678901";
-
-        // Test E.164 format
-        let e164 = format_phone_number(number, PhoneFormat::E164);
-        assert_eq!(e164, Some("+12345678901".to_string()));
-
-        // Test International format
-        let intl = format_phone_number(number, PhoneFormat::International);
-        assert!(intl.is_some());
-
-        // Test National format
-        let national = format_phone_number(number, PhoneFormat::National);
-        assert!(national.is_some());
-
-        // Test RFC3966 format
-        let rfc = format_phone_number(number, PhoneFormat::RFC3966);
-        assert!(rfc.is_some());
-    }
-
-    #[test]
-    fn test_phone_number_formatting_major_country_national_patterns() {
+    fn text_hint_does_not_silently_ignore_an_unrecognised_country() {
+        let correct = extract_phone_numbers_with_country_hint("Call 2025550173", "US");
         assert_eq!(
-            format_phone_number("+493012345678", PhoneFormat::National),
-            Some("30 1234 5678".to_string())
-        );
-        assert_eq!(
-            format_phone_number("+33123456789", PhoneFormat::National),
-            Some("1 23 45 67 89".to_string())
-        );
-        assert_eq!(
-            format_phone_number("+919876543210", PhoneFormat::National),
-            Some("98765 43210".to_string())
-        );
-        assert_eq!(
-            format_phone_number("+61412345678", PhoneFormat::National),
-            Some("4 1234 5678".to_string())
-        );
-    }
-
-    #[test]
-    fn test_rfc3966_grouping_has_no_dangling_digit() {
-        // Regression: RFC3966 used to chunk the national number every 3 digits,
-        // leaving an orphaned trailing group (e.g. "tel:+1-202-555-017-3").
-        // It must now use proper group sizes, joined with '-'.
-        assert_eq!(
-            format_phone_number("+12025550173", PhoneFormat::RFC3966),
-            Some("tel:+1-202-555-0173".to_string())
+            correct.first().and_then(|n| n.normalized.as_deref()),
+            Some("+12025550173")
         );
 
-        let numbers = [
-            "+12025550173",  // US, 10-digit national
-            "+442079460958", // GB
-            "+493012345678", // DE
-            "+33123456789",  // FR
-            "+919876543210", // IN
-            "+12684641234",  // Antigua, 7-digit national
-        ];
-        for number in numbers {
-            let rfc = format_phone_number(number, PhoneFormat::RFC3966).unwrap();
-            assert!(rfc.starts_with("tel:+"), "{rfc} missing tel:+ prefix");
-            // No group (after the country code) may be a single dangling digit.
-            let last_group = rfc.rsplit('-').next().unwrap();
-            assert!(
-                last_group.len() >= 2,
-                "{rfc} ends in a dangling single-digit group"
-            );
-            // The free function and the PhoneNumber method must agree.
-            let via_method =
-                crate::PhoneNumber::parse(number).map(|p| p.format(PhoneFormat::RFC3966));
+        // ISO codes are canonically upper case, but a differently-cased one is
+        // unambiguous and resolves to the same country.
+        for cased in ["us", "Us", "uS"] {
+            let got = extract_phone_numbers_with_country_hint("Call 2025550173", cased);
             assert_eq!(
-                via_method,
-                Some(rfc),
-                "free vs method mismatch for {number}"
+                got.first().and_then(|n| n.normalized.as_deref()),
+                Some("+12025550173"),
+                "hint {cased:?} should resolve like \"US\""
             );
         }
-    }
 
-    #[test]
-    fn test_phone_number_type_detection() {
-        // Test US toll-free number
-        let toll_free = is_toll_free_number("18001234567");
-        assert!(toll_free || !is_valid_phone_number("18001234567"));
-
-        // Test mobile detection function
-        let mobile_result = is_mobile_number("447123456789");
-        assert!(mobile_result || !is_valid_phone_number("447123456789"));
-
-        // Test landline detection function
-        let landline_result = is_landline_number("12025551234");
-        assert!(landline_result || !is_valid_phone_number("12025551234"));
-    }
-
-    #[test]
-    fn test_random_phone_number_generation() {
-        let random_us = generate_random_phone_number("US");
-        if let Some(ref number) = random_us {
-            assert!(is_valid_phone_number(number));
-        }
-
-        let random_gb = generate_random_phone_number("GB");
-        if let Some(ref number) = random_gb {
-            assert!(is_valid_phone_number(number));
-        }
-
-        // Test invalid country code
-        let invalid = generate_random_phone_number("XX");
-        assert!(invalid.is_none());
-    }
-
-    #[test]
-    fn test_phone_number_equality() {
-        let num1 = "+12345678901";
-        let num2 = "12345678901";
-        let num3 = "+12345678902";
-
-        assert!(are_phone_numbers_equal(num1, num2));
-        assert!(!are_phone_numbers_equal(num1, num3));
-    }
-
-    #[test]
-    fn test_batch_processing() {
-        let numbers = ["+12345678901", "invalid", "+442079460958"];
-
-        let results = validate_phone_numbers_batch(&numbers);
-        assert_eq!(results.len(), 3);
-
-        // First and third should be valid, second should be invalid
-        assert!(results[0]);
-        assert!(!results[1]);
-        assert!(results[2]);
-    }
-
-    #[test]
-    fn test_phone_number_suggestions() {
-        let suggestions = suggest_phone_number_corrections("123456789", Some("US"));
-        assert!(!suggestions.is_empty());
-
-        // Test potentially valid check
-        let potentially_valid = is_potentially_valid_phone_number("123-456-7890");
-        assert!(potentially_valid);
-
-        let not_valid = is_potentially_valid_phone_number("123");
-        assert!(!not_valid);
-    }
-
-    #[test]
-    fn test_type_detection_specific_cases() {
-        // Test with known patterns
-        let phone_type = detect_phone_number_type("447123456789");
-        // Should be Some(Mobile) or None if invalid
-        assert!(phone_type.is_some() || !is_valid_phone_number("447123456789"));
-
-        if let Some(ptype) = phone_type {
-            assert!(ptype == PhoneNumberType::Mobile || ptype == PhoneNumberType::Unknown);
-        }
-    }
-
-    // ========================================================================
-    // Text Parsing Tests
-    // ========================================================================
-
-    #[test]
-    fn test_extract_phone_numbers_from_text() {
-        use crate::extract_phone_numbers_from_text;
-
-        let text = "Call me at +12025550173 or +442079460958 for support.";
-        let numbers = extract_phone_numbers_from_text(text);
-
-        assert_eq!(numbers.len(), 2);
-        assert!(numbers[0].raw.contains("12025550173"));
-        assert!(numbers[1].raw.contains("442079460958"));
-    }
-
-    #[test]
-    fn test_extract_phone_with_various_formats() {
-        use crate::extract_phone_numbers_from_text;
-
-        let text = "Numbers: (202) 555-0173, 202.555.0174, 202-555-0175";
-        let numbers = extract_phone_numbers_from_text(text);
-
-        // Should find multiple number patterns
-        assert!(!numbers.is_empty());
-    }
-
-    #[test]
-    fn test_extract_valid_phone_numbers_only() {
-        use crate::extract_valid_phone_numbers_from_text;
-
-        let text = "Valid: +12025550173, Invalid: 123";
-        let numbers = extract_valid_phone_numbers_from_text(text);
-
-        // Should only return valid numbers
-        for num in &numbers {
-            assert!(num.is_valid);
-        }
-    }
-
-    #[test]
-    fn test_extract_with_country_hint() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        let text = "Call (202) 555-0173";
-        let numbers = extract_phone_numbers_with_country_hint(text, "US");
-
-        assert!(!numbers.is_empty());
-        // With US hint, national number should be recognized
-    }
-
-    #[test]
-    fn test_extract_french_national_format_with_leading_zero() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // French national numbers have 10 digits starting with 0
-        // The leading 0 is a trunk prefix and should be stripped when normalizing
-        let numbers = extract_phone_numbers_with_country_hint("0645342545", "FR");
-        assert_eq!(numbers.len(), 1);
-        assert!(numbers[0].is_valid);
-        assert_eq!(numbers[0].normalized, Some("+33645342545".to_string()));
-
-        // Also test without leading zero (9 digits)
-        let numbers_no_zero = extract_phone_numbers_with_country_hint("645342545", "FR");
-        assert_eq!(numbers_no_zero.len(), 1);
-        assert!(numbers_no_zero[0].is_valid);
-        assert_eq!(
-            numbers_no_zero[0].normalized,
-            Some("+33645342545".to_string())
-        );
-
-        // Test UK number with leading 0 (trunk prefix)
-        let uk_numbers = extract_phone_numbers_with_country_hint("07911123456", "GB");
-        assert_eq!(uk_numbers.len(), 1);
-        assert!(uk_numbers[0].is_valid);
-        assert_eq!(uk_numbers[0].normalized, Some("+447911123456".to_string()));
-    }
-
-    #[test]
-    fn test_country_hint_priority_over_ambiguous_normalization() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // "0612345678" with FR hint should normalize to +33612345678 (France)
-        // NOT +612345678 (Australia) - the country hint should take priority
-        let result = extract_phone_numbers_with_country_hint("0612345678", "FR");
-        assert_eq!(result.len(), 1);
-        assert!(result[0].is_valid);
-        assert_eq!(result[0].normalized, Some("+33612345678".to_string()));
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_german_numbers() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // German national format with leading 0
-        let numbers = extract_phone_numbers_with_country_hint("030 12345678", "DE");
-        assert_eq!(numbers.len(), 1);
-        assert!(numbers[0].is_valid);
-        assert_eq!(numbers[0].normalized, Some("+493012345678".to_string()));
-
-        // German mobile number
-        let mobile = extract_phone_numbers_with_country_hint("0151 12345678", "DE");
-        assert_eq!(mobile.len(), 1);
-        assert!(mobile[0].is_valid);
-        assert_eq!(mobile[0].normalized, Some("+4915112345678".to_string()));
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_already_international() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // Number already has country code - should still work
-        let numbers = extract_phone_numbers_with_country_hint("+33645342545", "FR");
-        assert_eq!(numbers.len(), 1);
-        assert!(numbers[0].is_valid);
-        assert_eq!(numbers[0].normalized, Some("+33645342545".to_string()));
-
-        // International number from different country than hint
-        let us_in_fr = extract_phone_numbers_with_country_hint("+12025550173", "FR");
-        assert_eq!(us_in_fr.len(), 1);
-        assert!(us_in_fr[0].is_valid);
-        // Should normalize using the actual country code, not the hint
-        assert_eq!(us_in_fr[0].normalized, Some("+12025550173".to_string()));
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_multiple_numbers() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        let text = "Call 0645342545 or 0712345678 for support";
-        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
-
-        assert_eq!(numbers.len(), 2);
-        assert!(numbers[0].is_valid);
-        assert!(numbers[1].is_valid);
-        assert_eq!(numbers[0].normalized, Some("+33645342545".to_string()));
-        assert_eq!(numbers[1].normalized, Some("+33712345678".to_string()));
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_mixed_formats() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // Mix of national and international formats in French context
-        let text = "Numbers: 06 45 34 25 45, +33 6 12 34 56 78";
-        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
-
-        assert_eq!(numbers.len(), 2);
-        // Both should be valid French numbers
-        for num in &numbers {
-            assert!(num.is_valid);
-            assert!(num.normalized.as_ref().unwrap().starts_with("+33"));
-        }
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_us_formats() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // Various US national formats
-        let formats = [
-            ("(202) 555-0173", "+12025550173"),
-            ("202-555-0173", "+12025550173"),
-            ("202.555.0173", "+12025550173"),
-            ("2025550173", "+12025550173"),
-        ];
-
-        for (input, expected) in formats {
-            let numbers = extract_phone_numbers_with_country_hint(input, "US");
-            assert_eq!(numbers.len(), 1, "Failed for input: {}", input);
-            assert!(numbers[0].is_valid, "Invalid for input: {}", input);
-            assert_eq!(
-                numbers[0].normalized,
-                Some(expected.to_string()),
-                "Wrong normalization for: {}",
-                input
-            );
-        }
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_invalid_country_code() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // Invalid country code should still attempt normalization
-        let numbers = extract_phone_numbers_with_country_hint("+12025550173", "XX");
-        assert_eq!(numbers.len(), 1);
-        // Should still work via fallback normalization
-        assert!(numbers[0].is_valid);
-        assert_eq!(numbers[0].normalized, Some("+12025550173".to_string()));
-
-        // National number with invalid country hint won't normalize
-        let national = extract_phone_numbers_with_country_hint("0645342545", "XX");
-        assert_eq!(national.len(), 1);
-        // Can't normalize without valid country
-        assert!(!national[0].is_valid);
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_australian_numbers() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // Australian mobile with leading 0
-        let numbers = extract_phone_numbers_with_country_hint("0412345678", "AU");
-        assert_eq!(numbers.len(), 1);
-        assert!(numbers[0].is_valid);
-        assert_eq!(numbers[0].normalized, Some("+61412345678".to_string()));
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_preserves_raw() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        let text = "Call (06) 45-34-25-45";
-        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
-
-        assert_eq!(numbers.len(), 1);
-        // Raw should preserve original format
-        assert!(numbers[0].raw.contains("06"));
-        // But normalized should be clean E.164
-        assert_eq!(numbers[0].normalized, Some("+33645342545".to_string()));
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_positions() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        let text = "Phone: 0645342545";
-        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
-
-        assert_eq!(numbers.len(), 1);
-        // Verify positions
-        assert!(numbers[0].start > 0); // Not at beginning
-        assert!(numbers[0].end > numbers[0].start);
-        assert!(numbers[0].end <= text.len());
-
-        // Extract using positions should give us the raw number
-        let extracted = &text[numbers[0].start..numbers[0].end];
-        assert!(extracted.contains("0645342545") || extracted == "0645342545");
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_empty_text() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        let numbers = extract_phone_numbers_with_country_hint("", "FR");
-        assert!(numbers.is_empty());
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_no_numbers() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        let text = "No phone numbers here, just text!";
-        let numbers = extract_phone_numbers_with_country_hint(text, "FR");
-        assert!(numbers.is_empty());
-    }
-
-    #[test]
-    fn test_extract_with_country_hint_short_numbers_ignored() {
-        use crate::extract_phone_numbers_with_country_hint;
-
-        // Numbers with less than 7 digits should be ignored
-        let text = "Code: 12345, PIN: 9999";
-        let numbers = extract_phone_numbers_with_country_hint(text, "US");
-        assert!(numbers.is_empty());
-    }
-
-    #[test]
-    fn test_count_phone_numbers() {
-        use crate::count_phone_numbers_in_text;
-
-        let text = "Contact: +12025550173, +442079460958";
-        let count = count_phone_numbers_in_text(text);
-
-        assert_eq!(count, 2);
-    }
-
-    #[test]
-    fn test_replace_phone_numbers() {
-        use crate::replace_phone_numbers_in_text;
-
-        let text = "Call +12025550173 today!";
-        let replaced = replace_phone_numbers_in_text(text, |_| "[PHONE]".to_string());
-
-        assert!(replaced.contains("[PHONE]"));
-        assert!(!replaced.contains("12025550173"));
-    }
-
-    #[test]
-    fn test_redact_phone_numbers() {
-        use crate::redact_phone_numbers;
-
-        let text = "Call +12025550173";
-        let redacted = redact_phone_numbers(text, 4);
-
-        // Should have stars and visible digits
-        assert!(redacted.contains("*") || redacted.contains("[PHONE]"));
-    }
-
-    #[test]
-    fn test_extract_positions() {
-        use crate::extract_phone_numbers_from_text;
-
-        let text = "Phone: +12025550173";
-        let numbers = extract_phone_numbers_from_text(text);
-
-        if !numbers.is_empty() {
-            let num = &numbers[0];
-            // Verify positions make sense
-            assert!(num.start < num.end);
-            assert!(num.end <= text.len());
-        }
-    }
-
-    // ========================================================================
-    // PhoneNumber Struct and Equality Tests
-    // ========================================================================
-
-    #[test]
-    fn test_phone_number_struct_parse() {
-        use crate::PhoneNumber as PhoneNum;
-
-        let phone = PhoneNum::parse("+12025550173");
-        assert!(phone.is_some());
-
-        let phone = phone.unwrap();
-        assert_eq!(phone.e164(), "+12025550173");
-    }
-
-    #[test]
-    fn test_phone_number_equality_trait() {
-        use crate::PhoneNumber as PhoneNum;
-
-        let num1 = PhoneNum::parse("+12025550173").unwrap();
-        let num2 = PhoneNum::parse("12025550173").unwrap();
-        let num3 = PhoneNum::parse("+442079460958").unwrap();
-
-        // Same number, different formats should be equal
-        assert_eq!(num1, num2);
-        // Different numbers should not be equal
-        assert_ne!(num1, num3);
-    }
-
-    #[test]
-    fn test_phone_number_hash() {
-        use crate::PhoneNumber as PhoneNum;
-        use std::collections::HashSet;
-
-        let mut set = HashSet::new();
-
-        let num1 = PhoneNum::parse("+12025550173").unwrap();
-        let num2 = PhoneNum::parse("12025550173").unwrap();
-
-        set.insert(num1);
-        set.insert(num2); // Should not add duplicate
-
-        assert_eq!(set.len(), 1);
-    }
-
-    #[test]
-    fn test_phone_number_with_country_hint() {
-        use crate::PhoneNumber as PhoneNum;
-
-        // National number with country hint
-        let phone = PhoneNum::parse_with_country("2025550173", "US");
-
-        if let Some(p) = phone {
-            assert!(p.e164().starts_with("+1"));
-        }
-    }
-
-    #[test]
-    fn test_phone_number_national_number() {
-        use crate::PhoneNumber as PhoneNum;
-
-        let phone = PhoneNum::parse("+12025550173").unwrap();
-        let national = phone.national_number();
-
-        // National number should not include country code
-        assert!(!national.starts_with("+"));
-        assert!(!national.starts_with("1") || national.len() < 11);
-    }
-
-    #[test]
-    fn test_phone_number_format_method() {
-        use crate::PhoneFormat;
-        use crate::PhoneNumber as PhoneNum;
-
-        let phone = PhoneNum::parse("+12025550173").unwrap();
-
-        let e164 = phone.format(PhoneFormat::E164);
-        assert!(e164.starts_with("+"));
-    }
-
-    #[test]
-    fn test_phone_number_display() {
-        use crate::PhoneNumber as PhoneNum;
-
-        let phone = PhoneNum::parse("+12025550173").unwrap();
-        let display = format!("{}", phone);
-
-        assert_eq!(display, "+12025550173");
-    }
-
-    #[test]
-    fn test_phone_number_from_str() {
-        use crate::PhoneNumber as PhoneNum;
-
-        let phone: Result<PhoneNum, _> = "+12025550173".parse();
-        assert!(phone.is_ok());
-
-        let invalid: Result<PhoneNum, _> = "invalid".parse();
-        assert!(invalid.is_err());
-    }
-
-    // ========================================================================
-    // PhoneNumberSet Tests
-    // ========================================================================
-
-    #[test]
-    fn test_phone_number_set_basic() {
-        use crate::PhoneNumberSet;
-
-        let mut set = PhoneNumberSet::new();
-
-        assert!(set.add("+12025550173"));
-        assert!(!set.add("12025550173")); // Duplicate
-
-        assert_eq!(set.len(), 1);
-    }
-
-    #[test]
-    fn test_phone_number_set_contains() {
-        use crate::PhoneNumberSet;
-
-        let mut set = PhoneNumberSet::new();
-        set.add("+12025550173");
-
-        assert!(set.contains("+12025550173"));
-        assert!(set.contains("12025550173")); // Same number, different format
-        assert!(!set.contains("+442079460958"));
-    }
-
-    #[test]
-    fn test_phone_number_set_remove() {
-        use crate::PhoneNumberSet;
-
-        let mut set = PhoneNumberSet::new();
-        set.add("+12025550173");
-
-        assert!(set.remove("12025550173")); // Remove using different format
-        assert!(set.is_empty());
-    }
-
-    #[test]
-    fn test_phone_number_set_from_iterator() {
-        use crate::PhoneNumberSet;
-
-        let numbers = vec!["+12025550173", "12025550173", "+442079460958"];
-        let set: PhoneNumberSet = numbers.into_iter().collect();
-
-        assert_eq!(set.len(), 2); // First two are duplicates
-    }
-
-    #[test]
-    fn test_phone_number_set_iter() {
-        use crate::PhoneNumberSet;
-
-        let mut set = PhoneNumberSet::new();
-        set.add("+12025550173");
-        set.add("+442079460958");
-
-        let count = set.iter().count();
-        assert_eq!(count, 2);
-    }
-
-    #[test]
-    fn test_phone_number_type_checks() {
-        use crate::PhoneNumber as PhoneNum;
-
-        // These tests depend on the type detection logic
-        let phone = PhoneNum::parse("+18005551234"); // US toll-free pattern
-        if let Some(p) = phone {
-            // Just verify the methods work
-            let _ = p.is_mobile();
-            let _ = p.is_landline();
-            let _ = p.is_toll_free();
-        }
-    }
-
-    // ========================================================================
-    // guess_country_from_number Tests
-    // ========================================================================
-
-    #[test]
-    fn test_guess_country_from_number_us() {
-        // US number without country code (10 digits)
-        let country = guess_country_from_number("2025550173");
-        assert!(country.is_some());
-        assert_eq!(country.unwrap().code, "US");
-    }
-
-    #[test]
-    fn test_guess_country_from_number_with_country_code() {
-        // US number with country code
-        let country = guess_country_from_number("12025550173");
-        assert!(country.is_some());
-        assert_eq!(country.unwrap().code, "US");
-
-        // UK number with country code
-        let country_gb = guess_country_from_number("442079460958");
-        assert!(country_gb.is_some());
-        // GB and GB-CYM share the same prefix 44
-        let gb_code = country_gb.unwrap().code;
-        assert!(gb_code == "GB" || gb_code == "GB-CYM");
-    }
-
-    #[test]
-    fn test_guess_country_from_number_invalid() {
-        // Empty string
-        let country = guess_country_from_number("");
-        assert!(country.is_none());
-
-        // Too short
-        let country_short = guess_country_from_number("123");
-        assert!(country_short.is_none());
-    }
-
-    #[test]
-    fn test_guess_country_from_number_various_countries() {
-        // German number
-        let de = guess_country_from_number("493012345678");
-        assert!(de.is_some());
-
-        // French number
-        let fr = guess_country_from_number("33123456789");
-        assert!(fr.is_some());
-    }
-
-    // ========================================================================
-    // extract_countries_batch Tests
-    // ========================================================================
-
-    #[test]
-    fn test_extract_countries_batch_basic() {
-        let numbers = ["+12025550173", "+442079460958", "+493012345678"];
-        let countries = extract_countries_batch(&numbers);
-
-        assert_eq!(countries.len(), 3);
-        assert!(countries[0].is_some());
-        assert_eq!(countries[0].unwrap().code, "US");
-        assert!(countries[1].is_some());
-        // GB and GB-CYM share the same prefix 44
-        let gb_code = countries[1].unwrap().code;
-        assert!(gb_code == "GB" || gb_code == "GB-CYM");
-        assert!(countries[2].is_some());
-        assert_eq!(countries[2].unwrap().code, "DE");
-    }
-
-    #[test]
-    fn test_extract_countries_batch_with_invalid() {
-        let numbers = ["+12025550173", "invalid", "+442079460958"];
-        let countries = extract_countries_batch(&numbers);
-
-        assert_eq!(countries.len(), 3);
-        assert!(countries[0].is_some());
-        assert!(countries[1].is_none());
-        assert!(countries[2].is_some());
-    }
-
-    #[test]
-    fn test_extract_countries_batch_empty() {
-        let numbers: [&str; 0] = [];
-        let countries = extract_countries_batch(&numbers);
-        assert!(countries.is_empty());
-    }
-
-    #[test]
-    fn test_extract_countries_batch_with_vec() {
-        let numbers = vec!["+12025550173".to_string(), "+442079460958".to_string()];
-        let countries = extract_countries_batch(&numbers);
-
-        assert_eq!(countries.len(), 2);
-        assert!(countries.iter().all(|c| c.is_some()));
-    }
-
-    // ========================================================================
-    // normalize_phone_numbers_batch Tests
-    // ========================================================================
-
-    #[test]
-    fn test_normalize_phone_numbers_batch_basic() {
-        let numbers = ["12025550173", "+442079460958", "invalid"];
-        let normalized = normalize_phone_numbers_batch(&numbers);
-
-        assert_eq!(normalized.len(), 3);
-        assert_eq!(normalized[0], Some("+12025550173".to_string()));
-        assert_eq!(normalized[1], Some("+442079460958".to_string()));
-        assert!(normalized[2].is_none());
-    }
-
-    #[test]
-    fn test_normalize_phone_numbers_batch_various_formats() {
-        let numbers = ["+1 (202) 555-0173", "1-202-555-0174", "(202) 555-0175"];
-        let normalized = normalize_phone_numbers_batch(&numbers);
-
-        assert_eq!(normalized.len(), 3);
-        // All should normalize successfully
-        for n in normalized.iter().flatten() {
-            assert!(n.starts_with("+"));
-        }
-    }
-
-    #[test]
-    fn test_normalize_phone_numbers_batch_empty() {
-        let numbers: [&str; 0] = [];
-        let normalized = normalize_phone_numbers_batch(&numbers);
-        assert!(normalized.is_empty());
-    }
-
-    #[test]
-    fn test_normalize_phone_numbers_batch_with_string_vec() {
-        let numbers = vec!["12025550173".to_string(), "442079460958".to_string()];
-        let normalized = normalize_phone_numbers_batch(&numbers);
-
-        assert_eq!(normalized.len(), 2);
-        assert!(normalized[0].is_some());
-        assert!(normalized[1].is_some());
-    }
-
-    // ========================================================================
-    // detect_phone_number_types_batch Tests
-    // ========================================================================
-
-    #[test]
-    fn test_detect_phone_number_types_batch_basic() {
-        let numbers = ["+12025550173", "+442079460958", "+18001234567"];
-        let types = detect_phone_number_types_batch(&numbers);
-
-        assert_eq!(types.len(), 3);
-        // All should have detected types
-        for phone_type in &types {
-            assert!(phone_type.is_some());
-        }
-    }
-
-    #[test]
-    fn test_detect_phone_number_types_batch_toll_free() {
-        let numbers = ["+18001234567", "+18881234567", "+18771234567"];
-        let types = detect_phone_number_types_batch(&numbers);
-
-        for t in types.iter().flatten() {
-            assert_eq!(*t, PhoneNumberType::TollFree);
-        }
-    }
-
-    #[test]
-    fn test_detect_phone_number_types_batch_with_invalid() {
-        let numbers = ["+12025550173", "invalid", "+442079460958"];
-        let types = detect_phone_number_types_batch(&numbers);
-
-        assert_eq!(types.len(), 3);
-        assert!(types[0].is_some());
-        assert!(types[1].is_none());
-        assert!(types[2].is_some());
-    }
-
-    #[test]
-    fn test_detect_phone_number_types_batch_uk_mobile() {
-        let numbers = ["+447123456789", "+447987654321"];
-        let types = detect_phone_number_types_batch(&numbers);
-
-        for t in types.iter().flatten() {
-            assert_eq!(*t, PhoneNumberType::Mobile);
-        }
-    }
-
-    // ========================================================================
-    // analyze_phone_numbers_batch Tests
-    // ========================================================================
-
-    #[test]
-    fn test_analyze_phone_numbers_batch_basic() {
-        let numbers = ["+12025550173", "+442079460958"];
-        let analyses = analyze_phone_numbers_batch(&numbers);
-
-        assert_eq!(analyses.len(), 2);
-        for analysis in &analyses {
-            assert!(analysis.is_valid);
-            assert!(analysis.normalized.is_some());
-            assert!(analysis.country.is_some());
-            assert!(analysis.phone_type.is_some());
-        }
-    }
-
-    #[test]
-    fn test_analyze_phone_numbers_batch_mixed() {
-        let numbers = ["+12025550173", "invalid", "+442079460958"];
-        let analyses = analyze_phone_numbers_batch(&numbers);
-
-        assert_eq!(analyses.len(), 3);
-
-        // First should be valid
-        assert!(analyses[0].is_valid);
-        assert_eq!(analyses[0].original, "+12025550173");
-
-        // Second should be invalid
-        assert!(!analyses[1].is_valid);
-        assert!(analyses[1].normalized.is_none());
-
-        // Third should be valid
-        assert!(analyses[2].is_valid);
-    }
-
-    #[test]
-    fn test_analyze_phone_numbers_batch_original_preserved() {
-        let numbers = ["+1 (202) 555-0173", "1-202-555-0174"];
-        let analyses = analyze_phone_numbers_batch(&numbers);
-
-        // Original format should be preserved
-        assert_eq!(analyses[0].original, "+1 (202) 555-0173");
-        assert_eq!(analyses[1].original, "1-202-555-0174");
-    }
-
-    #[test]
-    fn test_analyze_phone_numbers_batch_empty() {
-        let numbers: [&str; 0] = [];
-        let analyses = analyze_phone_numbers_batch(&numbers);
-        assert!(analyses.is_empty());
-    }
-
-    // ========================================================================
-    // group_equivalent_phone_numbers Tests
-    // ========================================================================
-
-    #[test]
-    fn test_group_equivalent_phone_numbers_basic() {
-        let numbers = ["+12025550173", "12025550173", "+442079460958"];
-        let groups = group_equivalent_phone_numbers(&numbers);
-
-        // Should have 2 groups: one for US numbers, one for UK
-        assert_eq!(groups.len(), 2);
-    }
-
-    #[test]
-    fn test_group_equivalent_phone_numbers_all_same() {
-        let numbers = [
-            "+12025550173",
-            "12025550173",
-            "+1 (202) 555-0173",
-            "1-202-555-0173",
-        ];
-        let groups = group_equivalent_phone_numbers(&numbers);
-
-        // All represent the same number, should be one group
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].len(), 4);
-    }
-
-    #[test]
-    fn test_group_equivalent_phone_numbers_all_different() {
-        let numbers = ["+12025550173", "+12025550174", "+12025550175"];
-        let groups = group_equivalent_phone_numbers(&numbers);
-
-        // All different numbers, should have 3 groups
-        assert_eq!(groups.len(), 3);
-    }
-
-    #[test]
-    fn test_group_equivalent_phone_numbers_empty() {
-        let numbers: [&str; 0] = [];
-        let groups = group_equivalent_phone_numbers(&numbers);
-        assert!(groups.is_empty());
-    }
-
-    #[test]
-    fn test_group_equivalent_phone_numbers_with_invalid() {
-        let numbers = ["+12025550173", "invalid", "+12025550173"];
-        let groups = group_equivalent_phone_numbers(&numbers);
-
-        // Should have 2 groups: one for valid numbers, one for invalid
-        assert!(!groups.is_empty());
-    }
-
-    // ========================================================================
-    // generate_random_phone_numbers Tests
-    // ========================================================================
-
-    #[test]
-    fn test_generate_random_phone_numbers_basic() {
-        let numbers = generate_random_phone_numbers("US", 5);
-        assert_eq!(numbers.len(), 5);
-    }
-
-    #[test]
-    fn test_generate_random_phone_numbers_do_not_repeat_same_value() {
-        let numbers = generate_random_phone_numbers("US", 8);
-        let unique_numbers: std::collections::HashSet<_> = numbers.iter().collect();
-
-        assert_eq!(numbers.len(), 8);
-        assert!(unique_numbers.len() > 1);
-    }
-
-    #[test]
-    fn test_generate_random_phone_numbers_various_countries() {
-        let us_numbers = generate_random_phone_numbers("US", 3);
-        assert_eq!(us_numbers.len(), 3);
-        for num in &us_numbers {
-            assert!(num.starts_with("+1"));
-        }
-
-        let gb_numbers = generate_random_phone_numbers("GB", 3);
-        assert_eq!(gb_numbers.len(), 3);
-        for num in &gb_numbers {
-            assert!(num.starts_with("+44"));
-        }
-    }
-
-    #[test]
-    fn test_generate_random_phone_numbers_invalid_country() {
-        let numbers = generate_random_phone_numbers("XX", 5);
-        assert!(numbers.is_empty());
-    }
-
-    #[test]
-    fn test_generate_random_phone_numbers_zero_count() {
-        let numbers = generate_random_phone_numbers("US", 0);
-        assert!(numbers.is_empty());
-    }
-
-    #[test]
-    fn test_generated_numbers_are_valid_and_idempotent() {
-        // Regression for the GB leading-zero generation bug: every generated
-        // number must be valid and must round-trip through normalization
-        // unchanged (a leading-zero national was being silently shortened).
-        for country in ["US", "GB", "DE", "FR", "AU", "IN", "CA"] {
-            let numbers = generate_random_phone_numbers(country, 500);
-            assert_eq!(numbers.len(), 500, "count for {country}");
-            for number in &numbers {
-                assert!(
-                    is_valid_phone_number(number),
-                    "{country} generated invalid number: {number}"
-                );
-                assert_eq!(
-                    normalize_phone_number(number).as_deref(),
-                    Some(number.as_str()),
-                    "{country} generated number does not round-trip: {number}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_normalize_never_emits_invalid_or_non_idempotent_output() {
-        // Regression for the trunk-zero stripping bug: when a leading zero in
-        // the national part is stripped, the result must still be a valid
-        // length for the country. Otherwise normalization must reject the input
-        // (return None) rather than emit a string the library itself rejects.
-        let inputs = [
-            "+10202555017",  // US: strip national 0 -> 9 digits (invalid) => None
-            "+440712345678", // GB: strip national 0 -> 9 digits (invalid) => None
-            "+12025550173",  // valid US, unchanged
-            "+442079460958", // valid GB, unchanged
-            "+490123456",    // DE: strip 0 -> 6 digits, still valid for DE
-            "+33612345678",  // valid FR
-        ];
-
-        for input in inputs {
-            if let Some(normalized) = normalize_phone_number(input) {
-                // Whatever we emit must itself be valid...
-                assert!(
-                    is_valid_phone_number(&normalized),
-                    "normalize({input}) = {normalized:?} which is not valid"
-                );
-                // ...and normalization must be idempotent.
-                assert_eq!(
-                    normalize_phone_number(&normalized).as_deref(),
-                    Some(normalized.as_str()),
-                    "normalize is not idempotent for {input}"
-                );
-            }
-
-            // The in-place variant must agree with the by-value variant.
-            let mut owned = input.to_string();
-            assert_eq!(
-                normalize_phone_number_in_place(&mut owned),
-                normalize_phone_number(input),
-                "in_place disagrees with normalize for {input}"
-            );
-        }
-    }
-
-    // ========================================================================
-    // is_potentially_valid_phone_number Tests (Additional)
-    // ========================================================================
-
-    #[test]
-    fn test_is_potentially_valid_phone_number_valid_lengths() {
-        // 7 digits - minimum valid
-        assert!(is_potentially_valid_phone_number("1234567"));
-
-        // 10 digits - common US format
-        assert!(is_potentially_valid_phone_number("1234567890"));
-
-        // 15 digits - maximum international
-        assert!(is_potentially_valid_phone_number("123456789012345"));
-    }
-
-    #[test]
-    fn test_is_potentially_valid_phone_number_invalid_lengths() {
-        // Too short
-        assert!(!is_potentially_valid_phone_number("123456"));
-
-        // Too long
-        assert!(!is_potentially_valid_phone_number("1234567890123456"));
-    }
-
-    #[test]
-    fn test_is_potentially_valid_phone_number_formatted() {
-        // With dashes
-        assert!(is_potentially_valid_phone_number("123-456-7890"));
-
-        // With spaces
-        assert!(is_potentially_valid_phone_number("123 456 7890"));
-
-        // With parentheses
-        assert!(is_potentially_valid_phone_number("(123) 456-7890"));
-    }
-
-    #[test]
-    fn test_is_potentially_valid_phone_number_all_zeros() {
-        // All zeros should be invalid
-        assert!(!is_potentially_valid_phone_number("0000000000"));
-    }
-
-    // ========================================================================
-    // suggest_phone_number_corrections Tests (Additional)
-    // ========================================================================
-
-    #[test]
-    fn test_suggest_phone_number_corrections_with_country_hint() {
-        let suggestions = suggest_phone_number_corrections("2025550173", Some("US"));
-        // Should suggest adding US country code
-        assert!(!suggestions.is_empty());
-        if !suggestions.is_empty() {
-            assert!(suggestions[0].starts_with("+1"));
-        }
-    }
-
-    #[test]
-    fn test_suggest_phone_number_corrections_already_valid() {
-        let suggestions = suggest_phone_number_corrections("+12025550173", None);
-        // Already valid, should return itself
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0], "+12025550173");
-    }
-
-    #[test]
-    fn test_suggest_phone_number_corrections_without_hint() {
-        let suggestions = suggest_phone_number_corrections("2025550173", None);
-        // Should try common country codes
-        // May or may not find valid suggestions depending on number
-        assert!(suggestions.len() <= 5); // Limited to 5 suggestions
-    }
-
-    // ========================================================================
-    // Additional Integration Tests
-    // ========================================================================
-
-    #[test]
-    fn test_full_workflow_validation_to_analysis() {
-        let numbers = ["+12025550173", "+442079460958", "+919876543210", "invalid"];
-
-        // Step 1: Validate
-        let valid_results = validate_phone_numbers_batch(&numbers);
-        assert_eq!(valid_results, vec![true, true, true, false]);
-
-        // Step 2: Normalize valid ones
-        let normalized = normalize_phone_numbers_batch(&numbers);
-        assert_eq!(normalized.len(), 4);
-
-        // Step 3: Extract countries
-        let countries = extract_countries_batch(&numbers);
-        assert_eq!(countries[0].unwrap().code, "US");
-        // GB and GB-CYM share the same prefix 44
-        let gb_code = countries[1].unwrap().code;
-        assert!(gb_code == "GB" || gb_code == "GB-CYM");
-        assert_eq!(countries[2].unwrap().code, "IN");
-        assert!(countries[3].is_none());
-
-        // Step 4: Detect types
-        let types = detect_phone_number_types_batch(&numbers);
-        assert!(types[0].is_some());
-        assert!(types[1].is_some());
-        assert!(types[2].is_some());
-        assert!(types[3].is_none());
-
-        // Step 5: Full analysis
-        let analyses = analyze_phone_numbers_batch(&numbers);
-        assert_eq!(analyses.len(), 4);
-    }
-
-    #[test]
-    fn test_batch_functions_accept_various_types() {
-        // Test with array
-        let arr = ["+12025550173", "+442079460958"];
-        assert_eq!(validate_phone_numbers_batch(&arr).len(), 2);
-
-        // Test with Vec
-        let vec = vec!["+12025550173", "+442079460958"];
-        assert_eq!(normalize_phone_numbers_batch(&vec).len(), 2);
-
-        // Test with Vec<String>
-        let string_vec = vec!["+12025550173".to_string(), "+442079460958".to_string()];
-        assert_eq!(extract_countries_batch(&string_vec).len(), 2);
-
-        // Test with slice
-        let slice: &[&str] = &["+12025550173", "+442079460958"];
-        assert_eq!(detect_phone_number_types_batch(slice).len(), 2);
-    }
-
-    #[test]
-    fn test_cymru_wales_support() {
-        // Test the newly added Wales support
-        let wales_number = "+442079460958";
-
-        assert!(is_valid_phone_number(wales_number));
-
-        let country = extract_country(wales_number);
-        assert!(country.is_some());
-        // Should be either GB or GB-CYM
-        let code = country.unwrap().code;
-        assert!(code == "GB" || code == "GB-CYM");
-    }
-
-    #[test]
-    fn test_phone_format_all_variants() {
-        let number = "+12025550173";
-
-        // Test all format variants
-        let e164 = format_phone_number(number, PhoneFormat::E164);
-        assert!(e164.is_some());
-        assert!(e164.unwrap().starts_with("+"));
-
-        let international = format_phone_number(number, PhoneFormat::International);
-        assert!(international.is_some());
-
-        let national = format_phone_number(number, PhoneFormat::National);
-        assert!(national.is_some());
-
-        let rfc3966 = format_phone_number(number, PhoneFormat::RFC3966);
-        assert!(rfc3966.is_some());
-        assert!(rfc3966.unwrap().starts_with("tel:"));
-    }
-
-    #[test]
-    fn test_detect_phone_number_type_comprehensive() {
-        // US Toll-free
-        let toll_free = detect_phone_number_type("+18005551234");
-        assert_eq!(toll_free, Some(PhoneNumberType::TollFree));
-
-        // UK Mobile (07x)
-        let uk_mobile = detect_phone_number_type("+447123456789");
-        assert_eq!(uk_mobile, Some(PhoneNumberType::Mobile));
-
-        // Invalid number
-        let invalid = detect_phone_number_type("invalid");
-        assert!(invalid.is_none());
-    }
-
-    #[test]
-    fn test_are_phone_numbers_equal_comprehensive() {
-        // Same number, different formats
-        assert!(are_phone_numbers_equal("+12025550173", "12025550173"));
-        assert!(are_phone_numbers_equal("+12025550173", "+1 (202) 555-0173"));
-        assert!(are_phone_numbers_equal("12025550173", "1-202-555-0173"));
-
-        // Different numbers
-        assert!(!are_phone_numbers_equal("+12025550173", "+12025550174"));
-        assert!(!are_phone_numbers_equal("+12025550173", "+442079460958"));
-
-        // Invalid numbers
-        assert!(!are_phone_numbers_equal("+12025550173", "invalid"));
-        assert!(!are_phone_numbers_equal("invalid1", "invalid2"));
-    }
-
-    #[test]
-    fn test_type_specific_check_functions() {
-        // is_mobile_number
-        let uk_mobile = "+447123456789";
-        assert!(is_mobile_number(uk_mobile));
-
-        // is_toll_free_number
-        let us_toll_free = "+18005551234";
-        assert!(is_toll_free_number(us_toll_free));
-
-        // is_landline_number
-        let us_landline = "+12025550173";
-        // US numbers default to FixedLine in NANP
-        assert!(is_landline_number(us_landline) || is_valid_phone_number(us_landline));
-    }
-
-    // ========================================================================
-    // Worldwide coverage tests — 40+ countries across 6 continents
-    // ========================================================================
-
-    #[test]
-    fn test_validation_worldwide() {
-        let valid_numbers = vec![
-            // North America
-            ("+12025550173", "US"),
-            ("+14155552671", "US"),
-            ("+18005551234", "US toll-free"),
-            ("+14165550198", "CA"),
-            ("+15145551234", "CA"),
-            // UK
-            ("+442087654321", "GB"),
-            ("+447911123456", "GB"),
-            // Western Europe
-            ("+493012345678", "DE"),
-            ("+4915112345678", "DE mobile"),
-            ("+33123456789", "FR"),
-            ("+33612345678", "FR mobile"),
-            ("+34612345678", "ES"),
-            ("+41446681800", "CH"),
-            ("+31201234567", "NL"),
-            ("+32234567890", "BE"),
-            // Northern Europe
-            ("+4721234567", "NO"),
-            ("+46812345678", "SE"),
-            ("+4512345678", "DK"),
-            // Eastern/Southern Europe
-            ("+48221234567", "PL"),
-            ("+351212345678", "PT"),
-            ("+353123456789", "IE"),
-            ("+302101234567", "GR"),
-            ("+36123456789", "HU"),
-            ("+402112345678", "RO"),
-            ("+905321234567", "TR"),
-            ("+39123456789", "IT"),
-            // Asia-Pacific
-            ("+61412345678", "AU"),
-            ("+819012345678", "JP"),
-            ("+8613800138000", "CN"),
-            ("+919876543210", "IN"),
-            ("+82221234567", "KR"),
-            ("+6591234567", "SG"),
-            ("+66812345678", "TH"),
-            ("+85212345678", "HK"),
-            ("+639171234567", "PH"),
-            // Americas
-            ("+5511987654321", "BR"),
-            ("+525512345678", "MX"),
-            ("+541112345678", "AR"),
-            ("+56912345678", "CL"),
-            ("+571234567890", "CO"),
-            // Middle East
-            ("+971501234567", "AE"),
-            ("+972541234567", "IL"),
-            ("+966501234567", "SA"),
-            // Africa
-            ("+27211234567", "ZA"),
-            ("+2348012345678", "NG"),
-            ("+254712345678", "KE"),
-            ("+201012345678", "EG"),
-            // Russia/CIS
-            ("+79161234567", "RU"),
-            ("+77272501234", "KZ"),
-            // Oceania
-            ("+6491234567", "NZ"),
-            ("+64211234567", "NZ mobile"),
-        ];
-
-        for (number, label) in &valid_numbers {
+        // An unrecognised code fails closed. The point of the defect was that
+        // it used to fall back to "no hint" and return a *different* valid
+        // number (+2025550173, Egypt); returning nothing is the safe answer.
+        for unknown in ["USA", "XX", "", "1"] {
+            let got = extract_phone_numbers_with_country_hint("Call 2025550173", unknown);
             assert!(
-                is_valid_phone_number(number),
-                "Expected {} ({}) to be valid",
-                number,
-                label
+                got.is_empty(),
+                "hint {unknown:?} should yield nothing, got {:?}",
+                got.first().and_then(|n| n.normalized.as_deref())
             );
         }
-
-        // Also verify normalization roundtrips
-        for (number, label) in &valid_numbers {
-            let normalized = normalize_phone_number(number);
-            assert!(
-                normalized.is_some(),
-                "Expected {} ({}) to normalize",
-                number,
-                label
-            );
-        }
-    }
-
-    #[test]
-    fn test_country_detection_worldwide() {
-        // Test extract_country for countries with unique prefix+length combos
-        let cases: Vec<(&str, &str)> = vec![
-            // Unique prefixes — unambiguous detection
-            ("+12025550173", "US"),   // prefix 1
-            ("+493012345678", "DE"),  // prefix 49
-            ("+33123456789", "FR"),   // prefix 33
-            ("+34612345678", "ES"),   // prefix 34
-            ("+41446681800", "CH"),   // prefix 41
-            ("+31201234567", "NL"),   // prefix 31
-            ("+32234567890", "BE"),   // prefix 32
-            ("+46812345678", "SE"),   // prefix 46
-            ("+4512345678", "DK"),    // prefix 45
-            ("+48221234567", "PL"),   // prefix 48
-            ("+351212345678", "PT"),  // prefix 351
-            ("+353123456789", "IE"),  // prefix 353
-            ("+302101234567", "GR"),  // prefix 30
-            ("+36123456789", "HU"),   // prefix 36
-            ("+402112345678", "RO"),  // prefix 40
-            ("+905321234567", "TR"),  // prefix 90
-            ("+61412345678", "AU"),   // prefix 61 (AU first in array)
-            ("+819012345678", "JP"),  // prefix 81
-            ("+8613800138000", "CN"), // prefix 86
-            ("+919876543210", "IN"),  // prefix 91
-            ("+82221234567", "KR"),   // prefix 82
-            ("+6591234567", "SG"),    // prefix 65
-            ("+66812345678", "TH"),   // prefix 66
-            ("+85212345678", "HK"),   // prefix 852
-            ("+639171234567", "PH"),  // prefix 63
-            ("+5511987654321", "BR"), // prefix 55
-            ("+525512345678", "MX"),  // prefix 52
-            ("+56912345678", "CL"),   // prefix 56
-            ("+571234567890", "CO"),  // prefix 57
-            ("+971501234567", "AE"),  // prefix 971
-            ("+966501234567", "SA"),  // prefix 966
-            ("+972541234567", "IL"),  // prefix 972
-            ("+27211234567", "ZA"),   // prefix 27
-            ("+254712345678", "KE"),  // prefix 254
-            ("+201012345678", "EG"),  // prefix 20
-            ("+2348012345678", "NG"), // prefix 234
-            ("+6491234567", "NZ"),    // prefix 64
-            ("+4721234567", "NO"),    // prefix 47, 8 digits (NO first)
-        ];
-
-        for (number, expected_code) in cases {
-            let country = extract_country(number);
-            assert!(country.is_some(), "Failed to detect country for {}", number);
-            assert_eq!(
-                country.unwrap().code,
-                expected_code,
-                "Wrong country for {}: expected {}, got {}",
-                number,
-                expected_code,
-                country.unwrap().code
-            );
-        }
-    }
-
-    #[test]
-    fn test_parse_with_country_worldwide() {
-        // Shared-prefix countries resolved via country hint
-        let shared_prefix_cases: Vec<(&str, &str, &str)> = vec![
-            // US vs CA (prefix 1)
-            ("+14165550198", "CA", "CA"),
-            ("+12025550173", "US", "US"),
-            // RU vs KZ (prefix 7)
-            ("+79161234567", "RU", "RU"),
-            ("+77272501234", "KZ", "KZ"),
-            // GB (prefix 44, resolves via hint over GB-CYM)
-            ("+442087654321", "GB", "GB"),
-            ("+447911123456", "GB", "GB"),
-        ];
-
-        for (number, hint, expected_code) in shared_prefix_cases {
-            let phone = crate::PhoneNumber::parse_with_country(number, hint);
-            assert!(
-                phone.is_some(),
-                "Failed to parse {} with hint {}",
-                number,
-                hint
-            );
-            assert_eq!(
-                phone.as_ref().unwrap().country.unwrap().code,
-                expected_code,
-                "Wrong country for {} with hint {}: got {}",
-                number,
-                hint,
-                phone.unwrap().country.unwrap().code
-            );
-        }
-
-        // National format numbers with country hint
-        let national_cases: Vec<(&str, &str, &str)> = vec![
-            // (input, country_hint, expected_e164)
-            ("(202) 555-0173", "US", "+12025550173"),
-            ("416-555-0198", "CA", "+14165550198"),
-            ("020 8765 4321", "GB", "+442087654321"),
-            ("030 12345678", "DE", "+493012345678"),
-            ("0412 345 678", "AU", "+61412345678"),
-        ];
-
-        for (input, country, expected_e164) in national_cases {
-            let phone = crate::PhoneNumber::parse_with_country(input, country);
-            assert!(
-                phone.is_some(),
-                "Failed to parse '{}' with country '{}'",
-                input,
-                country
-            );
-            let p = phone.unwrap();
-            assert_eq!(
-                p.e164(),
-                expected_e164,
-                "Wrong E.164 for '{}' with country '{}': got {}",
-                input,
-                country,
-                p.e164()
-            );
-        }
-    }
-
-    #[test]
-    fn test_normalization_formats_worldwide() {
-        // Verify normalization handles different input formats correctly
-        let cases: Vec<(&str, &str)> = vec![
-            // Already E.164 — should roundtrip
-            ("+12025550173", "+12025550173"),
-            ("+493012345678", "+493012345678"),
-            ("+33123456789", "+33123456789"),
-            ("+8613800138000", "+8613800138000"),
-            ("+919876543210", "+919876543210"),
-            ("+79161234567", "+79161234567"),
-            ("+972541234567", "+972541234567"),
-            ("+85212345678", "+85212345678"),
-            ("+639171234567", "+639171234567"),
-            ("+254712345678", "+254712345678"),
-            // With formatting characters — should clean to E.164
-            ("+1 202 555 0173", "+12025550173"),
-            ("+49 30 1234 5678", "+493012345678"),
-            ("+86 138 0013 8000", "+8613800138000"),
-            ("+91 98765 43210", "+919876543210"),
-            ("+7 916 123 4567", "+79161234567"),
-            ("+65 9123 4567", "+6591234567"),
-            ("+52 55 1234 5678", "+525512345678"),
-            ("+972 54 123 4567", "+972541234567"),
-            ("+27 21 123 4567", "+27211234567"),
-            // Without + prefix (digits only)
-            ("12025550173", "+12025550173"),
-            ("493012345678", "+493012345678"),
-            ("8613800138000", "+8613800138000"),
-        ];
-
-        for (input, expected) in cases {
-            let result = normalize_phone_number(input);
-            assert_eq!(
-                result.as_deref(),
-                Some(expected),
-                "Normalization of '{}' failed: got {:?}",
-                input,
-                result
-            );
-        }
-    }
-
-    #[test]
-    fn test_format_all_types_worldwide() {
-        // Verify all 4 format types work for diverse countries
-        let numbers = vec![
-            "+12025550173",   // US
-            "+493012345678",  // DE
-            "+33123456789",   // FR
-            "+34612345678",   // ES
-            "+41446681800",   // CH
-            "+31201234567",   // NL
-            "+61412345678",   // AU
-            "+8613800138000", // CN
-            "+919876543210",  // IN
-            "+819012345678",  // JP
-            "+82221234567",   // KR
-            "+6591234567",    // SG
-            "+66812345678",   // TH
-            "+85212345678",   // HK
-            "+525512345678",  // MX
-            "+971501234567",  // AE
-            "+972541234567",  // IL
-            "+27211234567",   // ZA
-            "+302101234567",  // GR
-            "+48221234567",   // PL
-            "+351212345678",  // PT
-            "+905321234567",  // TR
-            "+56912345678",   // CL
-            "+254712345678",  // KE
-            "+6491234567",    // NZ
-        ];
-
-        for number in &numbers {
-            // E164
-            let e164 = format_phone_number(number, PhoneFormat::E164);
-            assert!(e164.is_some(), "E164 failed for {}", number);
-            assert!(
-                e164.as_ref().unwrap().starts_with('+'),
-                "E164 should start with + for {}",
-                number
-            );
-
-            // International
-            let intl = format_phone_number(number, PhoneFormat::International);
-            assert!(intl.is_some(), "International failed for {}", number);
-            assert!(
-                intl.as_ref().unwrap().starts_with('+'),
-                "International should start with + for {}",
-                number
-            );
-            assert!(
-                intl.as_ref().unwrap().contains(' '),
-                "International should contain space for {}",
-                number
-            );
-
-            // National
-            let national = format_phone_number(number, PhoneFormat::National);
-            assert!(national.is_some(), "National failed for {}", number);
-            assert!(
-                !national.as_ref().unwrap().starts_with('+'),
-                "National should not start with + for {}",
-                number
-            );
-
-            // RFC3966
-            let rfc = format_phone_number(number, PhoneFormat::RFC3966);
-            assert!(rfc.is_some(), "RFC3966 failed for {}", number);
-            assert!(
-                rfc.as_ref().unwrap().starts_with("tel:+"),
-                "RFC3966 should start with tel:+ for {}",
-                number
-            );
-        }
-    }
-
-    #[test]
-    fn test_phone_number_struct_fields_worldwide() {
-        // Verify PhoneNumber struct fields for diverse countries
-        let cases: Vec<(&str, &str, u32)> = vec![
-            ("+12025550173", "US", 1),
-            ("+493012345678", "DE", 49),
-            ("+33123456789", "FR", 33),
-            ("+34612345678", "ES", 34),
-            ("+41446681800", "CH", 41),
-            ("+61412345678", "AU", 61),
-            ("+8613800138000", "CN", 86),
-            ("+919876543210", "IN", 91),
-            ("+819012345678", "JP", 81),
-            ("+6591234567", "SG", 65),
-            ("+66812345678", "TH", 66),
-            ("+85212345678", "HK", 852),
-            ("+639171234567", "PH", 63),
-            ("+525512345678", "MX", 52),
-            ("+56912345678", "CL", 56),
-            ("+571234567890", "CO", 57),
-            ("+971501234567", "AE", 971),
-            ("+972541234567", "IL", 972),
-            ("+966501234567", "SA", 966),
-            ("+27211234567", "ZA", 27),
-            ("+254712345678", "KE", 254),
-            ("+201012345678", "EG", 20),
-            ("+302101234567", "GR", 30),
-            ("+48221234567", "PL", 48),
-            ("+351212345678", "PT", 351),
-            ("+6491234567", "NZ", 64),
-        ];
-
-        for (number, expected_code, expected_prefix) in cases {
-            let phone = crate::PhoneNumber::parse(number);
-            assert!(phone.is_some(), "Failed to parse {}", number);
-            let phone = phone.unwrap();
-
-            assert_eq!(
-                phone.country.unwrap().code,
-                expected_code,
-                "Wrong country for {}",
-                number
-            );
-            assert_eq!(
-                phone.country_code(),
-                Some(expected_prefix),
-                "Wrong prefix for {}",
-                number
-            );
-            assert_eq!(phone.e164(), number, "E164 mismatch for {}", number);
-
-            let national = phone.national_number();
-            assert!(!national.is_empty(), "Empty national number for {}", number);
-            assert!(
-                national.chars().all(|c| c.is_ascii_digit()),
-                "National number should be all digits for {}",
-                number
-            );
-        }
-    }
-
-    #[test]
-    fn test_equality_across_formats_worldwide() {
-        // Numbers in different formats should be equal after normalization
-        let equivalent_pairs: Vec<(&str, &str)> = vec![
-            ("+12025550173", "12025550173"),
-            ("+12025550173", "+1 202 555 0173"),
-            ("+493012345678", "493012345678"),
-            ("+493012345678", "+49 30 1234 5678"),
-            ("+8613800138000", "8613800138000"),
-            ("+8613800138000", "+86 138 0013 8000"),
-            ("+919876543210", "+91 98765 43210"),
-            ("+79161234567", "+7 916 123 4567"),
-        ];
-
-        for (a, b) in equivalent_pairs {
-            assert!(
-                are_phone_numbers_equal(a, b),
-                "'{}' and '{}' should be equal",
-                a,
-                b
-            );
-        }
-    }
-
-    #[test]
-    fn test_strip_extension_word_boundary() {
-        use crate::strip_extension;
-
-        // Genuine extension markers are stripped (with and without a dot).
-        assert_eq!(strip_extension("2025550173 ext. 99"), "2025550173");
-        assert_eq!(strip_extension("2025550173 ext 99"), "2025550173");
-        assert_eq!(strip_extension("2025550173ext.5"), "2025550173");
-
-        // Words that merely contain "ext" must NOT be treated as a marker.
-        assert_eq!(strip_extension("next 5551234"), "next 5551234");
-        assert_eq!(strip_extension("text 5551234"), "text 5551234");
-
-        // No marker present -> input returned unchanged.
-        assert_eq!(strip_extension("+12025550173"), "+12025550173");
     }
 }
