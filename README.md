@@ -14,12 +14,15 @@ manipulating international phone numbers.
 
 ## Features
 
-- **Validation** - length-based everywhere, range-based inside the NANP
-- **Deterministic country resolution** - a shared calling code has one defined winner
+- **Validation** - structural: every length a plan uses, for every kind of number,
+  so a number is never rejected just because its range opened recently
+- **Deterministic country resolution** - a shared calling code is split by each
+  territory's own blocks, exactly as libphonenumber attributes them
 - **Real NANP validation** - a 490-entry area-code table sourced from NANPA
 - **Normalization** - canonical, idempotent E.164 output
 - **Formatting** - E.164, international, national, and a conformant RFC 3966 `tel:` URI
-- **Type detection** - mobile, fixed line, toll-free, premium rate, and more
+- **Type detection** - mobile, fixed line, toll-free, premium rate and more, for
+  every region
 - **Extensions** - parsed, preserved, and emitted in RFC 3966 output
 - **Text extraction** - find phone numbers in free-form text, in linear time
 - **Error reporting** - `ParseError` and a `try_*` API tell you *why* a number was rejected
@@ -30,9 +33,56 @@ manipulating international phone numbers.
 
 Read this before choosing the crate.
 
-Validation is driven by the country table shipped in this crate. A number is
-accepted when its country calling code is known and its national significant
-number has a length that country's numbering plan accepts.
+**Validation checks the structure of a numbering plan, not the allocation of
+its ranges.** A number is accepted when its country calling code is known and
+its national significant number has a length the plan uses for *some* kind of
+number — fixed line, mobile, freephone, premium rate, shared cost, UAN, VoIP or
+pager. The lengths are the dialable-from-abroad lengths in Google's
+libphonenumber metadata (last reconciled against release v9.0.40), taken as the
+union over every number type.
+
+The crate deliberately does not track which prefixes are in service. Operators
+open new ranges every month; a plan's lengths change once in a decade. So a
+Lebanese number in the `81` block is accepted whether or not that block has been
+allocated yet — but a Lebanese number of 6 or 10 digits never is:
+
+```rust
+use phonelib::{is_valid_phone_number, try_normalize_phone_number, ParseError};
+
+assert!(is_valid_phone_number("+961 81 123 456")); // 8 digits: a Lebanese length
+assert!(is_valid_phone_number("+961 1 234 567")); // 7 digits: a Beirut landline
+assert_eq!(
+    try_normalize_phone_number("+961 123 456"),
+    Err(ParseError::InvalidLength)
+);
+assert_eq!(
+    try_normalize_phone_number("+961 12 3456 7890"),
+    Err(ParseError::InvalidLength)
+);
+```
+
+That trade is measurable, against libphonenumber's own data:
+
+- **Nothing real is rejected.** Of 35,306 valid numbers generated from
+  libphonenumber's per-type patterns across all 254 of its regions, every one
+  is accepted and normalized to the same E.164 string, except 15 Dominican
+  toll-free numbers whose exchange starts with `1` — which the NANP's structure
+  forbids, and which phonelib rejects on purpose. Every one of them is also
+  attributed to the same country libphonenumber picks.
+- **Wrong lengths are.** All 51,550 numbers of a length their plan does not use
+  are rejected.
+- **It ages well.** Length rules taken from libphonenumber releases of November
+  2018, March 2020 and November 2022 still accept 97.3%, 98.0% and 99.5% of the
+  numbers valid today. The full range metadata of those same releases accepts
+  only 79.9%, 83.8% and 91.9% of them. A range-based validator that is not kept
+  up to date starts rejecting real numbers; a structural one mostly does not.
+
+The flip side is that a number of the right length in a block nobody has opened
+yet is accepted. No offline metadata can tell you a number is *in service*; if
+you need to know it is in a range that is *allocated* today, use a library
+backed by the complete
+[libphonenumber](https://github.com/google/libphonenumber) metadata, and keep
+that metadata current.
 
 **A number has to say which country it belongs to.** Give it a leading `+`, an
 `00` international access code, or a country via `parse_with_country`. A bare
@@ -65,37 +115,40 @@ The exception is calling code 1, where the area code is checked against the
 numbering plan rather than merely fitting a length — so `12025550173` resolves
 without a `+`.
 
-**Inside the North American Numbering Plan (`+1`) validation is genuinely
-range-based.** The area code is checked against a 490-entry table of assigned
-NPAs derived from the NANP Administrator's public NPA report, and the central
-office code is checked for structural validity. That is what makes `US` / `CA` /
-Caribbean-territory attribution exact and what rejects numbers such as
-`+1 111 111 1111`.
+**Inside the North American Numbering Plan (`+1`) the area code is checked
+too.** Every NANP number has the same length, so length says nothing about
+*which* of its 25 countries a number belongs to. The area code is checked
+against a 490-entry table of assigned NPAs derived from the NANP Administrator's
+public NPA report, and the central office code must start with 2-9. That is what
+makes `US` / `CA` / Caribbean-territory attribution exact and what rejects
+numbers such as `+1 111 111 1111`.
 
-**Outside the NANP validation is length-based only.** The crate does not carry
-per-operator prefix ranges, so a number with a plausible length is accepted even
-if its prefix is not in service. `+44 1234 567890` has a valid UK length and is
-accepted; whether that block was ever allocated is not something this crate can
-answer. If you need carrier-grade validation for every country, use a library
-backed by the complete
-[libphonenumber](https://github.com/google/libphonenumber) metadata.
+**Shared calling codes are split by block.** `+7` is Russia and Kazakhstan,
+`+44` the UK and the Crown Dependencies, `+39` Italy and the Vatican. A number
+in a territory's own block — Kazakhstan's leading `7`, Guernsey's `1481`, the
+Vatican's `06 698` — is reported as that territory, and every other number as
+the main region, exactly as libphonenumber attributes them. These prefixes only
+choose *which* country is reported; they never make a number invalid, so a
+block opened later is still accepted, as the main region. `extract_countries`
+returns every candidate.
 
-Type detection is metadata-driven in the same way. Countries without a published
-range table in this crate return `PhoneNumberType::Unknown` rather than a guess.
+**Type detection** uses range tables derived from libphonenumber for every
+region. A number in a block no table claims is `PhoneNumberType::Unknown`
+rather than a guess, and its type never affects whether it is valid.
 
-Some calling codes are shared by countries whose ranges length alone cannot
-separate. `extract_country` returns the designated primary, and
-`extract_countries` returns every candidate. For the same reason,
-`generate_random_phone_number` returns `None` for 14 entries whose range is not
-distinguishable by length from another country sharing the calling code:
+The ITU's non-geographic calling codes — international freephone `+800`,
+Inmarsat `+870`, the satellite and international networks `+881` to `+883` and
+the rest — are supported too, under the code `"001"` libphonenumber also uses.
 
-`AX`, `BL`, `CC`, `CX`, `EH`, `GG`, `GS`, `IM`, `JE`, `KZ`, `MF`, `SJ`, `VA`, `YT`
+`generate_random_phone_number` returns `None` only for Western Sahara (`EH`)
+and South Georgia (`GS`), which have no numbers of their own: every `+212` and
+`+500` number belongs to Morocco and the Falklands.
 
 ## Installation
 
 ```toml
 [dependencies]
-phonelib = "2.0.0"
+phonelib = "2.1.0"
 ```
 
 ### Dependencies
@@ -181,7 +234,7 @@ let c: &'static Country = phonelib::country_by_code("JP").unwrap();
 assert_eq!(c.name, "Japan");
 assert_eq!(c.code, "JP");          // ISO 3166-1 alpha-2
 assert_eq!(c.prefix, 81);          // E.164 calling code
-assert_eq!(c.phone_lengths, &[9, 10, 11][..]); // national significant lengths
+assert_eq!(c.phone_lengths, &[8, 9, 10, 11, 12, 13][..]); // national significant lengths
 
 // PhoneFormat and PhoneNumberType are `#[non_exhaustive]` enums, so a `match`
 // over them needs a wildcard arm.
@@ -290,17 +343,20 @@ assert_eq!(invalid, "nonsense");
 ### Country resolution
 
 Resolution is deterministic. A calling code shared by several countries has one
-designated primary that `extract_country` returns; `extract_countries` returns
-every candidate, most likely first.
+main region; a number in another territory's own block is reported as that
+territory, and every other number as the main region. `extract_countries`
+returns every candidate, the resolved one first.
 
 ```rust
 use phonelib::{extract_countries, extract_country};
 
 assert_eq!(extract_country("+442079460958").unwrap().code, "GB");
+assert_eq!(extract_country("+441481256789").unwrap().code, "GG"); // Guernsey
 assert_eq!(extract_country("+79161234567").unwrap().code, "RU");
-assert_eq!(extract_country("+212612345678").unwrap().code, "MA");
-assert_eq!(extract_country("+358401234567").unwrap().code, "FI");
-assert_eq!(extract_country("+390669821234").unwrap().code, "IT");
+assert_eq!(extract_country("+77012345678").unwrap().code, "KZ"); // Kazakhstan
+assert_eq!(extract_country("+390649911234").unwrap().code, "IT"); // Rome
+assert_eq!(extract_country("+390669812345").unwrap().code, "VA"); // the Vatican
+assert_eq!(extract_country("+870773111632").unwrap().code, "001"); // Inmarsat
 
 // Every country whose plan could account for the number.
 let codes: Vec<_> = extract_countries("+442079460958")
@@ -309,11 +365,11 @@ let codes: Vec<_> = extract_countries("+442079460958")
     .collect();
 assert_eq!(codes, ["GB", "GG", "IM", "JE"]);
 
-let codes: Vec<_> = extract_countries("+79161234567")
+let codes: Vec<_> = extract_countries("+77012345678")
     .iter()
     .map(|c| c.code)
     .collect();
-assert_eq!(codes, ["RU", "KZ"]);
+assert_eq!(codes, ["KZ", "RU"]);
 ```
 
 ### NANP resolution
@@ -336,8 +392,9 @@ assert_eq!(extract_country("+18095551234").unwrap().code, "DO");
 assert_eq!(extract_country("+18764561234").unwrap().prefix, 1876);
 
 // NANP-wide service ranges (800/900/500/700/710) are non-geographic, so they
-// are resolved by *type*. They are still attributed to a country: the table has
-// no non-geographic entry, so `extract_country` reports the United States.
+// are resolved by *type*. They are still attributed to a country: the NANP has
+// no non-geographic entry of its own, so `extract_country` reports the United
+// States.
 assert_eq!(
     detect_phone_number_type("+18005550199"),
     Some(PhoneNumberType::TollFree)
@@ -359,7 +416,7 @@ subscriber is.
 ```rust
 use phonelib::{countries, countries_by_calling_code, countries_by_code, country_by_code};
 
-assert_eq!(countries().len(), 249);
+assert_eq!(countries().len(), 259);
 assert!(countries().iter().any(|c| c.code == "JP"));
 
 assert_eq!(country_by_code("JP").unwrap().prefix, 81);
@@ -406,14 +463,25 @@ assert_eq!(
     Some("030 1234 5678".to_string())
 );
 
-// Italy has no trunk prefix; the leading zero is part of the number.
+// ...but only where the country dials it: Chinese mobiles take no 0, and
+// Russia writes its trunk 8 as a token of its own.
 assert_eq!(
-    format_phone_number("+390669821234", PhoneFormat::National),
-    Some("06 6982 1234".to_string())
+    format_phone_number("+8613112345678", PhoneFormat::National),
+    Some("131 1234 5678".to_string())
 );
 assert_eq!(
-    format_phone_number("+390669821234", PhoneFormat::International),
-    Some("+39 06 6982 1234".to_string())
+    format_phone_number("+79161234567", PhoneFormat::National),
+    Some("8 916 123 45 67".to_string())
+);
+
+// Italy has no trunk prefix; the leading zero is part of the number.
+assert_eq!(
+    format_phone_number("+390649911234", PhoneFormat::National),
+    Some("06 4991 1234".to_string())
+);
+assert_eq!(
+    format_phone_number("+390649911234", PhoneFormat::International),
+    Some("+39 06 4991 1234".to_string())
 );
 
 // An invalid number formats to None rather than to nonsense.
@@ -498,9 +566,20 @@ assert_eq!(
     Some(PhoneNumberType::FixedLineOrMobile)
 );
 
-// A valid number in a country with no range table is Unknown, not a guess.
+// Every country has a range table, derived from libphonenumber's metadata.
+assert_eq!(
+    detect_phone_number_type("+96171123456"),
+    Some(PhoneNumberType::Mobile)
+);
 assert_eq!(
     detect_phone_number_type("+9611234567"),
+    Some(PhoneNumberType::FixedLine)
+);
+
+// A valid number in a block no range claims — the UK has never opened `4` —
+// is Unknown, not a guess.
+assert_eq!(
+    detect_phone_number_type("+444123456789"),
     Some(PhoneNumberType::Unknown)
 );
 
@@ -751,34 +830,41 @@ let numbers = generate_random_phone_numbers("GB", 5);
 assert_eq!(numbers.len(), 5);
 assert!(numbers.iter().all(|n| is_valid_phone_number(n)));
 
-// `None` for the 14 entries whose range cannot be told apart by length from
-// another country sharing the calling code.
-assert!(generate_random_phone_number("JE").is_none());
-assert!(generate_random_phone_number("KZ").is_none());
+// A territory sharing a calling code gets a number from its own block.
+let jersey = generate_random_phone_number("JE").unwrap();
+assert_eq!(extract_country(&jersey).unwrap().code, "JE");
+
+// `None` for Western Sahara and South Georgia, which have no numbers of their
+// own...
+assert!(generate_random_phone_number("EH").is_none());
 // ...and for an unknown ISO code.
 assert!(generate_random_phone_number("ZZ").is_none());
 ```
 
 ## Country support
 
-The table holds **249 entries** — countries and territories, including the NANP
-territories that operate their own four-digit `1` + area code calling code.
+The table holds **259 entries**: 250 countries and territories, including the
+NANP territories that operate their own four-digit `1` + area code calling
+code, and the nine calling codes the ITU assigns to global services rather than
+to a country (`+800`, `+808`, `+870`, `+878`, `+881`, `+882`, `+883`, `+888`,
+`+979`), which carry the code `"001"`.
 
 ```rust
 use phonelib::countries;
 
-assert_eq!(countries().len(), 249);
+assert_eq!(countries().len(), 259);
 
-// Every entry has an ISO 3166-1 alpha-2 code and at least one valid length.
+// Every entry has an ISO 3166-1 alpha-2 code — or "001" for a global
+// service — and at least one valid length.
 assert!(countries()
     .iter()
-    .all(|c| c.code.len() == 2 && !c.phone_lengths.is_empty()));
+    .all(|c| (c.code.len() == 2 || c.code == "001") && !c.phone_lengths.is_empty()));
 ```
 
 Three ISO codes appear on more than one entry, because the country operates
 several calling codes: the Dominican Republic's `1809`/`1829`/`1849` overlays,
-Jamaica's `1876`/`1658`, and Puerto Rico's `1787`/`1939`. Use
-`countries_by_code` to see all of them.
+Jamaica's `1876`/`1658`, and Puerto Rico's `1787`/`1939` — as does `"001"`, once
+per global service. Use `countries_by_code` to see all of them.
 
 ```rust
 use phonelib::{countries, countries_by_code};
@@ -790,21 +876,28 @@ let multi: Vec<_> = countries()
     .collect::<std::collections::BTreeSet<_>>()
     .into_iter()
     .collect();
-assert_eq!(multi, ["DO", "JM", "PR"]);
+assert_eq!(multi, ["001", "DO", "JM", "PR"]);
 ```
 
 ## Performance
 
-Calling codes are resolved by binary search over a compile-time table, with no
-runtime initialization and no first-call cliff, and numbers are extracted from
-text in a single linear pass.
+Everything the parser consults is folded into flat tables at compile time, so a
+lookup is an array index and a length check is a bit test: a calling code is
+found by direct index, a NANP area code likewise, and a number's lengths are a
+bitmask per entry. There is no runtime initialization and no first-call cliff,
+and numbers are extracted from text in a single linear pass.
 
-Validation is not allocation-free. Every entry point runs the one parser, which
-builds the E.164 string as it goes, so a *successful* `is_valid_phone_number`,
-`extract_country` or `detect_phone_number_type` costs one small allocation each
-(`are_phone_numbers_equal`, two). A *rejected* input costs none — the parser
-fails before that point — which is the case that matters when you are screening
-untrusted input.
+`is_valid_phone_number`, `extract_country` and `detect_phone_number_type` do
+not allocate at all. `normalize_phone_number` and the formatters allocate the
+string they return, and a `PhoneNumber` holds its E.164 form and the original
+input in a single allocation.
+
+Against 2.0.0 on the same machine, validating a number takes 48-60% less
+time, country extraction 48-56% less, type detection about 32% less,
+`parse_with_country` about 50% less and a rejected parse about 30% less;
+`PhoneNumber::parse` is 7-16% faster, normalization, E.164 and international
+formatting and text extraction 4-15% faster, and national formatting — which
+now writes the prefix each country actually dials — takes the same time.
 
 Run the suite yourself with `cargo bench`; the numbers depend heavily on the
 machine, so none are quoted here. The benchmarks cover validation, normalization,
@@ -856,7 +949,7 @@ assert_eq!(cc, 1);
 ```rust
 use phonelib::{PhoneNumber, PhoneNumberType};
 
-let n = PhoneNumber::parse("+447911123456").unwrap();
+let n = PhoneNumber::parse("+447400123456").unwrap();
 
 // 1.x: n.country.map(|c| c.code) == Some("GB")
 assert_eq!(n.country().code, "GB");
@@ -953,7 +1046,7 @@ use phonelib::{extract_country, try_normalize_phone_number, ParseError};
 
 // 1.2.0: Some("VA")
 assert_eq!(try_normalize_phone_number("+3791234567"), Err(ParseError::UnknownCountryCode));
-assert_eq!(extract_country("+390669821234").unwrap().code, "IT");
+assert_eq!(extract_country("+390649911234").unwrap().code, "IT");
 assert_eq!(phonelib::country_by_code("VA").unwrap().prefix, 39);
 ```
 

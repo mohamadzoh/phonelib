@@ -234,17 +234,21 @@ const COUNTRY_FIXTURE: &[(&str, &str)] = &[
     ("MZ", "+258821234567"),  // Mozambique
 ];
 
-/// `(number, primary ISO code, an ISO code that also claims the range)`.
+/// `(number, ISO code it resolves to, an ISO code that also claims the range)`.
 ///
 /// `+7` is Russia and Kazakhstan, `+39` is Italy and the Vatican, `+44` is the
-/// UK and the Crown Dependencies. [`extract_country`] must return the
-/// documented primary; [`extract_countries`] must list the other candidate.
+/// UK and the Crown Dependencies. A number in a territory's own block — the
+/// leading 7 of Kazakhstan, the Vatican's 06 698, Guernsey's 1481 — resolves
+/// to that territory, and every other number to the main region.
+/// [`extract_country`] must return that country; [`extract_countries`] must
+/// list it first and the other candidate after it.
 const SHARED_CALLING_CODE: &[(&str, &str, &str)] = &[
-    ("+77012345678", "RU", "KZ"),
+    ("+77012345678", "KZ", "RU"),
     ("+79161234567", "RU", "KZ"),
-    ("+390669821234", "IT", "VA"),
+    ("+390669812345", "VA", "IT"),
+    ("+390649911234", "IT", "VA"),
     ("+442079460958", "GB", "JE"),
-    ("+441481123456", "GB", "GG"),
+    ("+441481123456", "GG", "GB"),
 ];
 
 /// Inputs that must be rejected, with the reason each one is rejected for.
@@ -288,7 +292,7 @@ const INVALID_CASES: &[(&str, ParseError)] = &[
     ("999", ParseError::TooShort),
     // The leading digits are not a calling code anyone uses.
     ("+9999999999999", ParseError::UnknownCountryCode),
-    ("+8709123456", ParseError::UnknownCountryCode),
+    ("+8751234567", ParseError::UnknownCountryCode),
     // Known country, wrong national length.
     ("+12025550", ParseError::InvalidLength),
     ("+1202555017", ParseError::InvalidLength),
@@ -416,15 +420,15 @@ mod validation {
     }
 
     #[test]
-    fn shared_calling_codes_resolve_to_the_documented_primary() {
-        for &(number, primary, also) in SHARED_CALLING_CODE {
-            assert_eq!(iso(number), primary, "{number} must resolve to {primary}");
+    fn shared_calling_codes_resolve_by_block_then_primary() {
+        for &(number, resolved, also) in SHARED_CALLING_CODE {
+            assert_eq!(iso(number), resolved, "{number} must resolve to {resolved}");
 
             let candidates: Vec<&str> = extract_countries(number).iter().map(|c| c.code).collect();
             assert_eq!(
                 candidates.first(),
-                Some(&primary),
-                "{number}: the primary must come first"
+                Some(&resolved),
+                "{number}: the country it resolves to must come first"
             );
             assert!(
                 candidates.contains(&also),
@@ -712,17 +716,47 @@ mod country_resolution {
 
     #[test]
     fn calling_codes_shared_with_a_territory_resolve_to_the_sovereign_state() {
-        // Each of these used to be hijacked by a shadowing table entry.
+        // Each of these used to be hijacked by a shadowing table entry. None is
+        // in a territory's own block, so each belongs to the main region.
         assert_eq!(iso("+442079460958"), "GB");
-        assert_eq!(iso("+441481123456"), "GB");
-        assert_eq!(iso("+441534123456"), "GB");
         assert_eq!(iso("+79161234567"), "RU");
         assert_eq!(iso("+212612345678"), "MA");
         assert_eq!(iso("+358401234567"), "FI");
         assert_eq!(iso("+590590123456"), "GP");
         assert_eq!(iso("+672312345"), "NF");
         assert_eq!(iso("+4791234567"), "NO");
-        assert_eq!(iso("+262639123456"), "RE");
+        assert_eq!(iso("+262262161234"), "RE");
+    }
+
+    /// A territory that shares a calling code owns the blocks of it that it
+    /// operates. Each expectation agrees with libphonenumber's attribution.
+    #[test]
+    fn a_territorys_own_block_resolves_to_the_territory() {
+        for (number, expected) in [
+            ("+441481256789", "GG"), // Guernsey fixed line
+            ("+447781123456", "GG"), // Guernsey mobile
+            ("+441534123456", "JE"), // Jersey fixed line
+            ("+441624123456", "IM"), // Isle of Man fixed line
+            ("+77012345678", "KZ"),  // Kazakh mobile
+            ("+77172123456", "KZ"),  // Astana fixed line
+            ("+390669812345", "VA"), // Vatican City
+            ("+4779123456", "SJ"),   // Svalbard
+            ("+358181234567", "AX"), // Mariehamn, Aland
+            ("+262269601234", "YT"), // Mayotte fixed line
+            ("+262639012345", "YT"), // Mayotte mobile
+            ("+2908999", "TA"),      // Tristan da Cunha
+            ("+5997151234", "BQ"),   // Bonaire
+            ("+61891621234", "CC"),  // Cocos (Keeling) Islands
+            ("+61891641234", "CX"),  // Christmas Island
+            ("+590590271234", "BL"), // Saint Barthelemy
+            ("+590590071234", "MF"), // Saint Martin
+        ] {
+            assert_eq!(iso(number), expected, "{number}");
+        }
+        // Curacao has seven-digit numbers too; only the leading digit tells it
+        // apart from Bonaire.
+        assert_eq!(iso("+5996001234"), "CW");
+        assert_eq!(iso("+59996781234"), "CW");
     }
 
     #[test]
@@ -783,7 +817,7 @@ mod country_resolution {
     }
 
     #[test]
-    fn extract_countries_lists_every_candidate_primary_first() {
+    fn extract_countries_lists_every_candidate_resolved_first() {
         assert_eq!(
             extract_countries("+79161234567")
                 .iter()
@@ -792,11 +826,25 @@ mod country_resolution {
             ["RU", "KZ"]
         );
         assert_eq!(
-            extract_countries("+390669821234")
+            extract_countries("+77012345678")
+                .iter()
+                .map(|c| c.code)
+                .collect::<Vec<_>>(),
+            ["KZ", "RU"]
+        );
+        assert_eq!(
+            extract_countries("+390649911234")
                 .iter()
                 .map(|c| c.code)
                 .collect::<Vec<_>>(),
             ["IT", "VA"]
+        );
+        assert_eq!(
+            extract_countries("+390669812345")
+                .iter()
+                .map(|c| c.code)
+                .collect::<Vec<_>>(),
+            ["VA", "IT"]
         );
         assert_eq!(
             extract_countries("+442079460958")
@@ -893,19 +941,31 @@ mod country_table {
             "the table lost most of its entries"
         );
 
+        // The ITU's calling codes for global services rather than countries,
+        // which carry the UN M.49 code for the world, as in libphonenumber.
+        const NON_GEOGRAPHIC: [u32; 9] = [800, 808, 870, 878, 881, 882, 883, 888, 979];
+
         for country in countries() {
             assert!(!country.name.is_empty(), "{:?} has no name", country.code);
-            assert_eq!(
-                country.code.len(),
-                2,
-                "{:?} is not an ISO 3166-1 alpha-2 code",
-                country.code
-            );
-            assert!(
-                country.code.bytes().all(|b| b.is_ascii_uppercase()),
-                "{:?} is not upper-case ASCII",
-                country.code
-            );
+            if country.code == "001" {
+                assert!(
+                    NON_GEOGRAPHIC.contains(&country.prefix),
+                    "+{} is not a non-geographic calling code",
+                    country.prefix
+                );
+            } else {
+                assert_eq!(
+                    country.code.len(),
+                    2,
+                    "{:?} is not an ISO 3166-1 alpha-2 code",
+                    country.code
+                );
+                assert!(
+                    country.code.bytes().all(|b| b.is_ascii_uppercase()),
+                    "{:?} is not upper-case ASCII",
+                    country.code
+                );
+            }
             assert!(
                 !country.phone_lengths.is_empty(),
                 "{} has no accepted lengths",
@@ -996,12 +1056,13 @@ mod country_table {
     const SHARED_CALLING_CODES: &[(u32, &str, &[&str])] = &[
         (1, "+12025550173", &["US", "CA"]),
         (7, "+79161234567", &["RU", "KZ"]),
-        (39, "+390669821234", &["IT", "VA"]),
+        (39, "+390649911234", &["IT", "VA"]),
         (44, "+442079460958", &["GB", "GG", "IM", "JE"]),
         (47, "+4791234567", &["NO", "SJ"]),
         (61, "+61412345678", &["AU", "CC", "CX"]),
         (212, "+212612345678", &["MA", "EH"]),
         (262, "+262692691234", &["RE", "YT"]),
+        (290, "+29022158", &["SH", "TA"]),
         (358, "+358401234567", &["FI", "AX"]),
         (500, "+50051234", &["FK", "GS"]),
         (590, "+590590123456", &["GP", "BL", "MF"]),
@@ -1217,12 +1278,12 @@ mod formatting {
         ("+3544101234", 7, "410 1234", "+354 410 1234"), // Iceland, [3, 4]
         ("+35679012345", 8, "7901 2345", "+356 7901 2345"), // Malta, [4, 4]
         ("+34912345678", 9, "912 345 678", "+34 912 345 678"), // Spain, [3, 3, 3]
-        ("+541143214321", 10, "114 321 4321", "+54 114 321 4321"), // Argentina, [3, 3, 4]
+        ("+302101234567", 10, "210 123 4567", "+30 210 123 4567"), // Greece, [3, 3, 4]
         (
-            "+5491143214321",
+            "+3080012345678",
             11,
-            "911 4321 4321",
-            "+54 911 4321 4321", // Argentina, [3, 4, 4]
+            "800 1234 5678",
+            "+30 800 1234 5678", // Greek freephone, [3, 4, 4]
         ),
         (
             "+43783700628291",
@@ -1235,6 +1296,12 @@ mod formatting {
             13,
             "0821 463 039 6663", // Austria, [3, 3, 3, 4]
             "+43 821 463 039 6663",
+        ),
+        (
+            "+781081234567890",
+            14,
+            "8 810 812 3456 7890", // Russian `8 10 8` freephone, [3, 3, 4, 4]
+            "+7 810 812 3456 7890",
         ),
     ];
 
@@ -1272,7 +1339,7 @@ mod formatting {
             .max()
             .expect("the country table is not empty");
         assert_eq!(
-            longest, 13,
+            longest, 14,
             "a plan now accepts {longest} national digits; extend DEFAULT_GROUPING_CASES"
         );
     }
@@ -1349,7 +1416,9 @@ mod classification {
         // United Kingdom.
         ("+448001234567", TollFree),
         ("+448081234567", TollFree),
-        ("+448451234567", SharedCost),
+        // 084/087 have been "service charge" numbers since Ofcom's 2015
+        // reform, and libphonenumber files them as premium rate.
+        ("+448451234567", PremiumRate),
         ("+449091234567", PremiumRate),
         ("+443001234567", Uan),
         ("+445612345678", Voip),
@@ -1406,8 +1475,11 @@ mod classification {
         ("+905321234567", Mobile),
         ("+353861234567", Mobile),
         ("+35312345678", FixedLine),
-        // No range table: an honest Unknown rather than a first-digit guess.
-        ("+96179123123", Unknown),
+        // Lebanon, which used to have no range table at all.
+        ("+96179123123", Mobile),
+        // A valid length in a block the UK has never opened: an honest
+        // Unknown rather than a guess.
+        ("+444123456789", Unknown),
     ];
 
     #[test]
@@ -1545,13 +1617,12 @@ mod generation {
     /// The exact set of countries that cannot be generated.
     ///
     /// Every one of them shares a calling code with an entry whose accepted
-    /// lengths cover its own, so no number can be minted that resolves back to
-    /// it. A country *leaving* this set is a fix; a country *joining* it is a
-    /// resolution regression, and either way the list in the crate docs has to
-    /// be updated — so the set is pinned exactly rather than bounded.
-    const UNGENERATABLE: &[&str] = &[
-        "AX", "BL", "CC", "CX", "EH", "GG", "GS", "IM", "JE", "KZ", "MF", "SJ", "VA", "YT",
-    ];
+    /// lengths cover its own and has no numbering block of its own, so no
+    /// number can be minted that resolves back to it. A country *leaving* this
+    /// set is a fix; a country *joining* it is a resolution regression, and
+    /// either way the list in the crate docs has to be updated — so the set is
+    /// pinned exactly rather than bounded.
+    const UNGENERATABLE: &[&str] = &["EH", "GS"];
 
     #[test]
     fn generation_returns_none_exactly_for_the_shadowed_countries() {
@@ -2985,21 +3056,24 @@ mod regressions {
                 .e164(),
             "+390698123456"
         );
-        // The Vatican shares the Italian plan, and `LEADING_ZERO_SIGNIFICANT`
-        // lists "VA" — but VA's `[10]` is wholly inside IT's `[6..=11]`, so no
-        // number ever resolves to VA and the entry is belt-and-braces. A VA hint
-        // returns an Italian number; that is what is actually observable.
-        let vatican = PhoneNumber::parse_with_country("06 6982 1234", "VA")
-            .expect("a VA hint must still parse");
-        assert_eq!(vatican.country().code, "IT");
-        assert_eq!(vatican.e164(), "+390669821234");
+        // The Vatican shares the Italian plan and owns its `06 698` block: a
+        // number there is the Vatican's whichever hint it is read with, and any
+        // other Rome number is Italy's, even under a VA hint.
+        for hint in ["VA", "IT"] {
+            let vatican = PhoneNumber::parse_with_country("06 6982 1234", hint)
+                .expect("a Vatican number must parse");
+            assert_eq!(vatican.country().code, "VA", "hint {hint}");
+            assert_eq!(vatican.e164(), "+390669821234");
+        }
+        let rome = PhoneNumber::parse_with_country("06 4991 1234", "VA").unwrap();
+        assert_eq!(rome.country().code, "IT");
+        assert_eq!(rome.e164(), "+390649911234");
         assert_eq!(
             extract_countries("+390669821234")
                 .iter()
                 .map(|c| c.code)
                 .collect::<Vec<_>>(),
-            ["IT", "VA"],
-            "VA is only ever reachable as a secondary candidate"
+            ["VA", "IT"]
         );
     }
 
@@ -3031,19 +3105,26 @@ mod regressions {
         assert_eq!(iso("+37866123456"), "SM");
     }
 
-    /// Gabon is deliberately *not* on that list. It writes `0XX XX XX XX`
-    /// nationally, but the ITU is explicit that international callers dial the
-    /// eight digits after the zero, so the zero is an ordinary trunk prefix.
-    /// Adding `"GA"` to `LEADING_ZERO_SIGNIFICANT` makes the second number here
-    /// validate as a nine-digit Gabonese number that does not exist.
+    /// Gabon writes its current numbers `0XX XX XX XX` nationally, but the ITU
+    /// is explicit that international callers dial the eight digits after the
+    /// zero, so that zero is an ordinary trunk prefix and must be dropped, not
+    /// kept as a nine-digit number that does not exist. Numbers from the
+    /// earlier plan are eight digits with a zero of their own (`01 44 12 34`,
+    /// libphonenumber's own example), and stay as written.
     #[test]
     fn a_trunk_zero_is_not_promoted_to_a_significant_one() {
-        assert_eq!(country_by_code("GA").unwrap().phone_lengths, &[8]);
+        assert_eq!(country_by_code("GA").unwrap().phone_lengths, &[7, 8]);
         assert!(is_valid_phone_number("+24111441234"));
         assert_eq!(iso("+24111441234"), "GA");
-        assert!(
-            !is_valid_phone_number("+24101441234"),
-            "Gabon's leading zero is a trunk prefix, not part of the number"
+        assert_eq!(
+            normalize_phone_number("+241 011 44 12 34").as_deref(),
+            Some("+24111441234"),
+            "the trunk zero of the national format must be dropped"
+        );
+        assert_eq!(
+            normalize_phone_number("+241 01 44 12 34").as_deref(),
+            Some("+24101441234"),
+            "an old-plan number keeps its own leading zero"
         );
     }
 
@@ -3423,7 +3504,7 @@ mod regressions {
             ("+14165550198", "CA"),
             ("+590590123456", "GP"),
             ("+672312345", "NF"),
-            ("+262639123456", "RE"),
+            ("+262262161234", "RE"),
             ("+4791234567", "NO"),
         ] {
             assert_eq!(iso(number), expected, "{number}");
@@ -3481,20 +3562,26 @@ mod regressions {
     }
 
     /// Guernsey and Jersey carried `phone_lengths: [6]`; real GG/JE numbers
-    /// have a 10-digit national significant number.
+    /// have the UK's 10-digit national significant number. Guernsey also
+    /// shares the UK's short freephone and premium-rate lengths.
     #[test]
     fn crown_dependency_lengths_are_realistic() {
-        for code in ["GG", "JE", "IM"] {
+        for (code, lengths) in [
+            ("GG", &[7u8, 9, 10][..]),
+            ("JE", &[10][..]),
+            ("IM", &[10][..]),
+        ] {
             let country = country_by_code(code).unwrap_or_else(|| panic!("{code} missing"));
             assert_eq!(country.prefix, 44, "{code}");
-            assert_eq!(country.phone_lengths, &[10], "{code}");
+            assert_eq!(country.phone_lengths, lengths, "{code}");
         }
-        // Their numbers parse, even though +44 resolves to GB by default.
-        assert!(is_valid_phone_number("+441481123456"));
-        assert!(is_valid_phone_number("+441534123456"));
+        // Their numbers parse, and resolve to the dependency whose block they
+        // are in rather than to the UK.
+        assert_eq!(iso("+441481123456"), "GG");
+        assert_eq!(iso("+441534123456"), "JE");
         assert!(extract_countries("+441481123456")
             .iter()
-            .any(|c| c.code == "GG"));
+            .any(|c| c.code == "GB"));
     }
 
     /// Uninhabited territories with fabricated numbering plans produced pure
@@ -3517,19 +3604,27 @@ mod regressions {
         }
     }
 
-    /// Japan rejected every 9-digit landline and freephone number.
+    /// Japan rejected every 9-digit landline and freephone number. The
+    /// freephone ranges run from 8 digits (`0800` behind the trunk zero) to 13
+    /// (`0037`/`0066` carrier freephone).
     #[test]
     fn japanese_nine_digit_numbers_are_accepted() {
-        assert_eq!(country_by_code("JP").unwrap().phone_lengths, &[9, 10, 11]);
+        assert_eq!(
+            country_by_code("JP").unwrap().phone_lengths,
+            &[8, 9, 10, 11, 12, 13]
+        );
         assert_eq!(iso("+81312345678"), "JP");
         assert_eq!(iso("+81120123456"), "JP");
         assert!(is_valid_phone_number("+819012345678"));
     }
 
     /// Romania's `phone_lengths: [10]` rejected every real Romanian number.
+    /// The plan is nine digits, plus a handful of six-digit fixed-line service
+    /// numbers.
     #[test]
     fn romanian_numbers_are_nine_digits() {
-        assert_eq!(country_by_code("RO").unwrap().phone_lengths, &[9]);
+        assert_eq!(country_by_code("RO").unwrap().phone_lengths, &[6, 9]);
+        assert!(!is_valid_phone_number("+402123456789"), "ten digits");
         assert_eq!(iso("+40712345678"), "RO");
         assert_eq!(iso("+40212345678"), "RO");
     }
@@ -3587,11 +3682,18 @@ mod regressions {
     }
 
     /// Pitcairn was assigned +870, the Inmarsat SNAC, which is not a country
-    /// calling code.
+    /// calling code. Inmarsat numbers are real, though: +870 is one of the
+    /// ITU's non-geographic codes, and resolves to the `"001"` entry for it.
     #[test]
     fn the_inmarsat_snac_is_not_a_country() {
-        assert_eq!(err("+8709123456"), ParseError::UnknownCountryCode);
-        assert!(countries().iter().all(|c| c.prefix != 870));
+        let inmarsat = extract_country("+870773111632").expect("an Inmarsat number is valid");
+        assert_eq!(inmarsat.code, "001");
+        assert_eq!(inmarsat.name, "Inmarsat");
+        assert!(countries()
+            .iter()
+            .filter(|c| c.prefix == 870)
+            .all(|c| c.code == "001"));
+        assert_eq!(err("+8709123456"), ParseError::InvalidLength);
     }
 
     /// The Dominican Republic and Puerto Rico could only ever reach one of
@@ -3700,7 +3802,7 @@ mod regressions {
     fn uk_service_numbers_classify_correctly() {
         for (number, expected) in [
             ("+448001234567", PhoneNumberType::TollFree),
-            ("+448451234567", PhoneNumberType::SharedCost),
+            ("+448451234567", PhoneNumberType::PremiumRate),
             ("+443001234567", PhoneNumberType::Uan),
             ("+445612345678", PhoneNumberType::Voip),
             ("+449091234567", PhoneNumberType::PremiumRate),
@@ -3734,13 +3836,10 @@ mod regressions {
     /// through to a single global first-digit guess that inverted the answer for
     /// CN, IT, BR and IN.
     ///
-    /// Each country now has its own arm. Most are range tables keyed on the
-    /// first two to four digits (CN, IT, BR); the fall-through inside the
-    /// `IN`/`CN`/`ZA`/`NG` arms is still a deliberately coarse first-digit
-    /// heuristic once the named ranges have been tried, so the rows below use
-    /// numbers whose answer does not depend on which of the two decided it.
-    /// [`indian_metro_landlines_are_not_classified_as_mobile`] covers the one
-    /// place where that coarseness needed an explicit exception.
+    /// Each country is classified by its own range table, derived from
+    /// libphonenumber's metadata (`src/ranges.rs`) rather than a first-digit
+    /// heuristic; [`indian_metro_landlines_are_not_classified_as_mobile`]
+    /// covers the case a heuristic got wrong.
     #[test]
     fn each_country_has_its_own_classification_arm() {
         for (number, expected) in [
@@ -3755,9 +3854,9 @@ mod regressions {
         ] {
             assert_eq!(detect_phone_number_type(number), Some(expected), "{number}");
         }
-        // A country with no range table says so instead of guessing.
+        // A block no range claims says so instead of guessing.
         assert_eq!(
-            detect_phone_number_type("+96179123123"),
+            detect_phone_number_type("+444123456789"),
             Some(PhoneNumberType::Unknown)
         );
     }
@@ -4469,8 +4568,9 @@ mod regressions {
     fn a_huge_count_is_not_used_as_an_allocation_hint() {
         assert!(generate_random_phone_numbers("ZZ", usize::MAX).is_empty());
         // A country that cannot be generated stops at the first failure rather
-        // than trying `count` times.
-        assert!(generate_random_phone_numbers("GG", usize::MAX).is_empty());
+        // than trying `count` times. Western Sahara has no numbers of its own:
+        // every `+212` number resolves to Morocco.
+        assert!(generate_random_phone_numbers("EH", usize::MAX).is_empty());
     }
 
     // --- suggestions and batch APIs -----------------------------------------
@@ -4670,17 +4770,19 @@ mod regressions {
             // Korea: 080 freephone and 060 premium, likewise two digits.
             ("+82801234567", TollFree),
             ("+82601234567", PremiumRate),
-            ("+825012345678", Voip),
+            // 050 is personal numbering; VoIP is 070.
+            ("+825012345678", PersonalNumber),
+            ("+827012345678", Voip),
             ("+821012345678", Mobile),
             ("+82212345678", FixedLine),
             // Korean "representative" numbers are 15xx / 16xx / 18xx and share
-            // their leading pair with the mobile block, so only the eight-digit
-            // length tells them apart. Matching the pair alone would swallow
-            // every 15x/16x/18x mobile.
+            // their leading digits with paging (15x) and mobile (16x, 18x)
+            // blocks, so only the eight-digit length tells them apart.
+            // Matching the digits alone would swallow every one of those.
             ("+8215881234", Uan),
             ("+8216441234", Uan),
             ("+8218991234", Uan),
-            ("+82150123456", Mobile),
+            ("+82150123456", Pager),
             ("+82160123456", Mobile),
             ("+82180123456", Mobile),
             // UK: all of 09 is premium, not only 090x.
@@ -4689,8 +4791,9 @@ mod regressions {
             ("+448001234567", TollFree),
             ("+447000123456", PersonalNumber),
             ("+447600123456", Pager),
-            // Ireland: 0818 is shared cost inside the 08 mobile block.
-            ("+353818123456", SharedCost),
+            // Ireland: 0818 is a universal access number inside the 08 mobile
+            // block.
+            ("+353818123456", Uan),
             ("+353861234567", Mobile),
         ];
 
@@ -4761,6 +4864,261 @@ mod regressions {
                 got.is_empty(),
                 "hint {unknown:?} should yield nothing, got {:?}",
                 got.first().and_then(|n| n.normalized.as_deref())
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Real-world numbers
+//
+// Each row below was checked against Google's libphonenumber metadata (the
+// data behind the libraries this crate is most often compared with): it is a
+// valid number there, and here it resolves to the same E.164 string and the
+// same country. Several were rejected, mis-normalized or misattributed before
+// the country table was reconciled with that metadata.
+// ============================================================================
+
+mod real_world_numbers {
+    use super::*;
+
+    /// Validation checks the *structure* of a plan — its lengths — and not
+    /// which ranges happen to be allocated today, so a block opened after the
+    /// table was written is still accepted, while a length the plan never uses
+    /// is not.
+    #[test]
+    fn validation_checks_structure_not_allocation() {
+        // Lebanon: fixed lines are 7 digits, mobiles 8, whatever the block.
+        for number in ["+961 1 234 567", "+961 71 123 456", "+961 81 123 456"] {
+            assert!(is_valid_phone_number(number), "{number}");
+        }
+        for number in ["+961 123 456", "+961 12 3456 7890"] {
+            assert_eq!(err(number), ParseError::InvalidLength, "{number}");
+        }
+        // The UK has never opened its `4` block: the length is valid, so the
+        // number is accepted, and its type is honestly unknown.
+        assert_eq!(
+            detect_phone_number_type("+444123456789"),
+            Some(PhoneNumberType::Unknown)
+        );
+    }
+
+    /// Every number type counts towards a plan's lengths, not only fixed lines
+    /// and mobiles: freephone, shared-cost and premium numbers are often
+    /// shorter or longer.
+    #[test]
+    fn service_numbers_of_every_length_are_accepted() {
+        for (number, country, kind) in [
+            ("+318001234", "NL", PhoneNumberType::TollFree), // 0800 1234
+            ("+61131313", "AU", PhoneNumberType::SharedCost), // 13 13 13
+            ("+611300123456", "AU", PhoneNumberType::SharedCost),
+            ("+611800123456", "AU", PhoneNumberType::TollFree),
+            ("+6518001234567", "SG", PhoneNumberType::TollFree),
+            ("+9118001234567", "IN", PhoneNumberType::TollFree),
+            ("+852800123456", "HK", PhoneNumberType::TollFree),
+            ("+55800123456", "BR", PhoneNumberType::TollFree),
+            ("+9718001234", "AE", PhoneNumberType::TollFree),
+            ("+376690123456", "AD", PhoneNumberType::Mobile),
+        ] {
+            let parsed = PhoneNumber::parse(number).unwrap_or_else(|| panic!("{number}"));
+            assert_eq!(parsed.e164(), number);
+            assert_eq!(parsed.country().code, country, "{number}");
+            assert_eq!(parsed.phone_type(), kind, "{number}");
+        }
+    }
+
+    /// In a few plans the national number itself begins with `0`; that zero
+    /// is part of the number and must survive. Everywhere else a zero after
+    /// the calling code is a trunk prefix written by mistake.
+    #[test]
+    fn a_significant_leading_zero_is_kept_and_a_trunk_zero_is_not() {
+        for number in [
+            "+242061234567",    // Congo mobile
+            "+22601234567",     // Burkina Faso mobile
+            "+50700800123456",  // Panama 00800 freephone
+            "+81003712345678",  // Japan 0037 freephone
+            "+910008001234567", // India 000800 freephone
+            "+24101441234",     // Gabon, earlier plan
+        ] {
+            assert_eq!(normalize_phone_number(number).as_deref(), Some(number));
+        }
+        for (written, expected) in [
+            ("+81 0 90 1234 5678", "+819012345678"),
+            ("+91 0 98765 43210", "+919876543210"),
+            ("+241 011 77 10 97", "+24111771097"),
+        ] {
+            assert_eq!(normalize_phone_number(written).as_deref(), Some(expected));
+        }
+    }
+
+    /// A trunk prefix copied from the national format is dropped even where it
+    /// is not a zero.
+    #[test]
+    fn a_trunk_prefix_after_the_calling_code_is_dropped() {
+        for (written, expected) in [
+            ("+7 8 916 123 45 67", "+79161234567"),
+            ("+36 06 1 234 5678", "+3612345678"),
+        ] {
+            assert_eq!(normalize_phone_number(written).as_deref(), Some(expected));
+        }
+    }
+
+    /// A national number is read with its own country's trunk prefix, and a
+    /// number dialled *from* that country with its access code.
+    #[test]
+    fn national_numbers_parse_with_their_own_trunk_and_access_codes() {
+        for (input, hint, expected, country) in [
+            ("06 1 234 5678", "HU", "+3612345678", "HU"),
+            ("8 029 123-45-67", "BY", "+375291234567", "BY"),
+            ("8 800 123 45 67", "RU", "+78001234567", "RU"),
+            ("8 701 234 5678", "KZ", "+77012345678", "KZ"),
+            ("010 44 20 7946 0958", "JP", "+442079460958", "GB"),
+            ("8 10 44 20 7946 0958", "RU", "+442079460958", "GB"),
+            ("0021 44 20 7946 0958", "BR", "+442079460958", "GB"),
+            ("00700 44 20 7946 0958", "KR", "+442079460958", "GB"),
+            // Thailand's `001` is also the start of its own freephone range.
+            ("001 800 123 4567", "TH", "+660018001234567", "TH"),
+            // So is Korea's `00798`.
+            ("00798 1234 5678", "KR", "+820079812345678", "KR"),
+        ] {
+            let parsed = PhoneNumber::parse_with_country(input, hint)
+                .unwrap_or_else(|| panic!("{input:?} with hint {hint}"));
+            assert_eq!(parsed.e164(), expected, "{input:?} with hint {hint}");
+            assert_eq!(parsed.country().code, country, "{input:?} with hint {hint}");
+        }
+    }
+
+    /// The hint used to fall back to reading the digits as whatever calling
+    /// code they happened to spell, so a Czech number came back Afghan and a
+    /// failed French reading came back British.
+    #[test]
+    fn a_hint_never_turns_a_national_number_into_a_foreign_one() {
+        let czech = PhoneNumber::parse_with_country("93123456789", "CZ").unwrap();
+        assert_eq!(czech.e164(), "+42093123456789");
+        assert_eq!(czech.country().code, "CZ");
+        assert_eq!(
+            PhoneNumber::try_parse_with_country("442079460958", "FR").unwrap_err(),
+            ParseError::InvalidLength
+        );
+        // The hint's own calling code written without its `+` still works.
+        assert_eq!(
+            PhoneNumber::parse_with_country("442079460958", "GB")
+                .unwrap()
+                .e164(),
+            "+442079460958"
+        );
+    }
+
+    /// A number dialled out with `00` is foreign even where the plan has
+    /// numbers of its own that start with `0` — Italy's do, but none starts
+    /// with `00` — and a trunk prefix is one zero, never two.
+    #[test]
+    fn a_number_dialled_out_with_00_is_foreign() {
+        for (input, hint, expected, country) in [
+            ("00 33 1 23 45 67 89", "IT", "+33123456789", "FR"),
+            ("00 41 44 668 18 00", "IT", "+41446681800", "CH"),
+            ("00 1 212 555 0123", "VA", "+12125550123", "US"),
+            ("00 1 876 555 1234", "WS", "+18765551234", "JM"),
+        ] {
+            let parsed = PhoneNumber::parse_with_country(input, hint).unwrap();
+            assert_eq!(parsed.e164(), expected, "{input:?} with hint {hint}");
+            assert_eq!(parsed.country().code, country, "{input:?} with hint {hint}");
+        }
+        // What follows the access code is checked like any other number: an
+        // unassigned NANP area code is not smuggled in behind it.
+        assert!(PhoneNumber::parse_with_country("00 1 111 111 1111", "CV").is_none());
+        // Outside the plans that have them, a national number never starts
+        // with 00.
+        assert!(!is_valid_phone_number("+22600431020"));
+        assert!(is_valid_phone_number("+22601234567"));
+    }
+
+    /// The national form of a number must not read as the plan's own access
+    /// code: a Russian number starting `10` is not written behind its `8`,
+    /// which would make it `8 10`, dialling out.
+    #[test]
+    fn a_national_form_never_reads_as_dialling_out() {
+        let national = format_phone_number("+71039463539", PhoneFormat::National).unwrap();
+        assert_eq!(
+            PhoneNumber::parse_with_country(&national, "RU")
+                .unwrap()
+                .e164(),
+            "+71039463539"
+        );
+    }
+
+    /// An N11 exchange is only reserved as an *area* code.
+    #[test]
+    fn nanp_n11_exchanges_are_real_numbers() {
+        assert_eq!(iso("+18004117246"), "US"); // 1-800-411-PAIN
+        assert_eq!(iso("+16644111234"), "MS"); // Montserrat fixed lines
+        assert_eq!(iso("+12029111234"), "US");
+        assert_eq!(err("+19111234567"), ParseError::InvalidAreaCode);
+    }
+
+    /// The ITU's calling codes for global services, with libphonenumber's own
+    /// example numbers. They have no national form.
+    #[test]
+    fn non_geographic_calling_codes_are_supported() {
+        for (number, kind) in [
+            ("+80012345678", PhoneNumberType::TollFree),
+            ("+80812345678", PhoneNumberType::SharedCost),
+            ("+870301234567", PhoneNumberType::Mobile),
+            ("+8823421234", PhoneNumberType::Mobile),
+            ("+883510012345", PhoneNumberType::Voip),
+            ("+979123456789", PhoneNumberType::PremiumRate),
+        ] {
+            let parsed = PhoneNumber::parse(number).unwrap_or_else(|| panic!("{number}"));
+            assert_eq!(parsed.country().code, "001", "{number}");
+            assert_eq!(parsed.phone_type(), kind, "{number}");
+            assert_eq!(
+                parsed.format(PhoneFormat::National),
+                parsed.format(PhoneFormat::International)
+            );
+        }
+    }
+
+    /// Every region is classified from its own ranges, not only a hand-picked
+    /// few.
+    #[test]
+    fn every_region_is_classified() {
+        for (number, kind) in [
+            ("+33612345678", PhoneNumberType::Mobile),
+            ("+8613112345678", PhoneNumberType::Mobile),
+            ("+96171123456", PhoneNumberType::Mobile),
+            ("+9611234567", PhoneNumberType::FixedLine),
+            ("+77012345678", PhoneNumberType::Mobile),
+            ("+5511987654321", PhoneNumberType::Mobile),
+            ("+2417903896", PhoneNumberType::Mobile),
+        ] {
+            assert_eq!(detect_phone_number_type(number), Some(kind), "{number}");
+        }
+    }
+
+    /// The national format writes the prefix the country actually dials —
+    /// which is not always its trunk prefix — and always reads back.
+    #[test]
+    fn national_format_writes_the_prefix_the_country_dials() {
+        for (number, hint, national_digits) in [
+            ("+442079460958", "GB", "02079460958"),
+            ("+8613112345678", "CN", "13112345678"), // mobiles take no 0
+            ("+611800123456", "AU", "1800123456"),   // nor does 1800
+            ("+96171123456", "LB", "71123456"),
+            ("+9611234567", "LB", "01234567"),
+            ("+79161234567", "RU", "89161234567"),
+            ("+375291234567", "BY", "80291234567"),
+            ("+24111771097", "GA", "011771097"),
+            // A written 0 would make this a different, older Gabonese number.
+            ("+2417903896", "GA", "7903896"),
+        ] {
+            let national = format_phone_number(number, PhoneFormat::National).unwrap();
+            let digits: String = national.chars().filter(char::is_ascii_digit).collect();
+            assert_eq!(digits, national_digits, "{number} -> {national:?}");
+            assert_eq!(
+                PhoneNumber::parse_with_country(&national, hint)
+                    .unwrap_or_else(|| panic!("{national:?} must read back as {hint}"))
+                    .e164(),
+                number
             );
         }
     }

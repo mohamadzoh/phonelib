@@ -77,14 +77,25 @@ fn max_groups(has_plus: bool) -> usize {
 /// Three covers `" - "`, `" — "` and a double space.
 const MAX_SEPARATOR_RUN: usize = 3;
 
-/// Fewest digits an unhinted candidate must carry to be worth reporting.
+/// Fewest digits an unhinted candidate written with a `+` must carry to be
+/// worth reporting.
 ///
 /// Derived from the table, never hardcoded: with no hint a candidate must spell
 /// out its own calling code, so the floor is the smallest `calling code +
-/// national number` it allows. [`crate::MIN_NATIONAL_LEN`] alone would be low
-/// enough for [`redact`] to start eating order numbers out of prose. With a
-/// hint the floor drops to that country's shortest length.
+/// national number` it allows. A bare run of digits must also clear
+/// [`crate::MIN_UNMARKED_DIGITS`], or [`redact`] would start eating order
+/// numbers out of prose. With a hint the floor drops to that country's
+/// shortest length.
 const MIN_DIGITS: usize = shortest_dialable_length();
+
+/// The digit floors a candidate must clear to be reported.
+#[derive(Clone, Copy)]
+struct Floors {
+    /// For a candidate written with a leading `+`.
+    marked: usize,
+    /// For a bare run of digits.
+    bare: usize,
+}
 
 // The country table must stay inside the bounds this module assumes.
 const _: () = assert!(
@@ -365,7 +376,7 @@ enum Outcome {
 }
 
 /// Scan one candidate beginning at `start` and decide what to do with it.
-fn scan(text: &str, start: usize, hint: Option<&'static Country>, min_digits: usize) -> Outcome {
+fn scan(text: &str, start: usize, hint: Option<&'static Country>, floors: Floors) -> Outcome {
     let mut cand = Candidate::new();
     let mut pos = start;
     let mut depth = 0usize;
@@ -478,6 +489,11 @@ fn scan(text: &str, start: usize, hint: Option<&'static Country>, min_digits: us
     }
 
     // --- backtrack: try the longest span first, dropping one group at a time ---
+    let min_digits = if cand.has_plus {
+        floors.marked
+    } else {
+        floors.bare
+    };
     let mut fallback: Option<Stop> = None;
     for idx in (0..cand.stop_count).rev() {
         let stop = cand.stops[idx];
@@ -672,15 +688,24 @@ pub(crate) fn extract_with_hint(
     text: &str,
     hint: Option<&'static Country>,
 ) -> Vec<ExtractedPhoneNumber> {
-    let min_digits = match hint {
-        Some(country) => country
-            .phone_lengths
-            .iter()
-            .map(|&len| len as usize)
-            .min()
-            .unwrap_or(MIN_DIGITS)
-            .min(MIN_DIGITS),
-        None => MIN_DIGITS,
+    let floors = match hint {
+        Some(country) => {
+            let shortest = country
+                .phone_lengths
+                .iter()
+                .map(|&len| len as usize)
+                .min()
+                .unwrap_or(MIN_DIGITS)
+                .min(MIN_DIGITS);
+            Floors {
+                marked: shortest,
+                bare: shortest,
+            }
+        }
+        None => Floors {
+            marked: MIN_DIGITS,
+            bare: MIN_DIGITS.max(crate::MIN_UNMARKED_DIGITS),
+        },
     };
 
     let mut results = Vec::new();
@@ -690,7 +715,7 @@ pub(crate) fn extract_with_hint(
         let can_start = digit_value(c).is_some() || is_plus(c) || is_open_paren(c);
         let (prev, prev2) = preceding(text, pos);
         if can_start && !start_is_blocked(prev, prev2) {
-            match scan(text, pos, hint, min_digits) {
+            match scan(text, pos, hint, floors) {
                 Outcome::Found(number) => {
                     let end = number.end;
                     results.push(number);

@@ -144,15 +144,12 @@ fn generation_round_trips_or_returns_none() {
         }
     }
 
-    // Only entries shadowed by another country on the same calling code may be
-    // ungeneratable, and the set is documented in the crate docs, so it is
-    // pinned exactly: a country joining it is a resolution regression and a
-    // country leaving it is a fix, and either way the docs have to change.
-    let expected: BTreeSet<&str> = [
-        "AX", "BL", "CC", "CX", "EH", "GG", "GS", "IM", "JE", "KZ", "MF", "SJ", "VA", "YT",
-    ]
-    .into_iter()
-    .collect();
+    // Only entries shadowed by another country on the same calling code, with
+    // no numbering block of their own, may be ungeneratable, and the set is
+    // documented in the crate docs, so it is pinned exactly: a country joining
+    // it is a resolution regression and a country leaving it is a fix, and
+    // either way the docs have to change.
+    let expected: BTreeSet<&str> = ["EH", "GS"].into_iter().collect();
     assert_eq!(ungeneratable, expected);
     for reachable in ["US", "CA", "GB", "DE", "FR", "IT", "JP", "AU", "IN", "BR"] {
         assert!(

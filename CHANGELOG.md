@@ -5,6 +5,109 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-09-28
+
+A correctness and performance release, measured against Google's
+libphonenumber metadata (release v9.0.40) used as an oracle. Validation stays
+structural — a plan's lengths, never its range allocations — but the lengths
+are now complete, so a real number is no longer rejected for being a freephone,
+premium, UAN or other service number, and a number in a newly opened range is
+still accepted.
+
+Measured over 35,306 valid numbers generated from libphonenumber's per-type
+patterns across all 254 of its regions, 2.0.0 rejected or mis-normalized 4,285
+(12%) when written internationally and 4,547 when written nationally with a
+country hint. This release rejects 15, all Dominican toll-free numbers whose
+exchange starts with `1`, which the NANP's structure forbids. It attributes
+every number to the same country libphonenumber does, and still rejects all
+51,550 numbers of a length their plan does not use.
+
+### Changed
+
+Results change in ways that are fixes, but will change your output:
+
+- **Numbers in a territory's own block resolve to that territory.** `+7 7…`
+  is Kazakhstan, `+44 1481` / `7781` Guernsey, `+44 1534` Jersey, `+44 1624`
+  the Isle of Man, `+39 06 698` the Vatican, `+47 79` Svalbard, `+358 18`
+  Aland, `+262 269` / `639` Mayotte, `+290 8` Tristan da Cunha, `+599 3` /
+  `4` / `7` Bonaire, and so on, as libphonenumber attributes them. Other
+  numbers still resolve to the main region, and `extract_countries` lists the
+  resolved country first. The prefixes involved only choose which territory is
+  reported; they never make a number invalid.
+- **`phone_lengths` widened on 95 entries** to every length libphonenumber
+  gives any number type of that plan, capped at the E.164 maximum. One entry
+  narrowed: Zimbabwe, to the 7, 9 and 10 digits dialable from abroad (its 5-
+  and 6-digit forms are local-only dialling, and it has no 8-digit numbers). The per-entry
+  comments in `src/constants.rs` explain each change.
+- **Type detection uses derived range tables for every region**, replacing the
+  hand-written tables for 27 countries, which disagreed with libphonenumber on
+  about a third of sampled numbers (Norwegian `800` freephone as fixed line,
+  Swiss `68x`/`69x` mobiles as fixed line, and more). Classifications that
+  change include UK `084`/`087` (premium rate since Ofcom's 2015 reform,
+  formerly shared cost), Korean `050` (personal number, formerly VoIP) and
+  Irish `0818` (UAN, formerly shared cost). A number in a block no table
+  claims is `Unknown`.
+- **National format writes the prefix the country actually dials.** Chinese
+  mobiles, Australian `1800` numbers, Lebanese mobiles and others take no trunk
+  `0`; Belarus writes `8 0` before geographic numbers only; Gabon writes its
+  `0`. 99.6% of national formats now carry the same digits as libphonenumber's,
+  up from 89.6%. A number under a non-geographic calling code has no national
+  form and is written internationally.
+- **`parse_with_country` no longer reads a national number as a foreign one.**
+  It used to fall back to reading the digits as whatever calling code they
+  spelled, so `("93123456789", "CZ")` became an Afghan number. Only the hint's
+  own calling code is recognised without a `+` now.
+- `generate_random_phone_number` returns `None` only for `EH` and `GS`; every
+  other territory on a shared calling code gets a number from its own block.
+- **`countries()` now includes nine entries whose `code` is `"001"`**, not an
+  ISO 3166-1 alpha-2 code: the non-geographic calling codes listed under
+  **Added**. A number that parsed under 2.0.0 never resolves to one — only
+  `+800`, `+870` and similar numbers, which 2.0.0 rejected — but code that
+  lists every entry (a country picker, say) or assumes a two-letter code
+  should filter them out with `c.code != "001"`.
+
+### Added
+
+- **The ITU's non-geographic calling codes**: `+800`, `+808`, `+870`, `+878`,
+  `+881`, `+882`, `+883`, `+888` and `+979`, under the code `"001"` as in
+  libphonenumber. Inmarsat numbers (`+870`) validate again.
+- **Tristan da Cunha** (`TA`, `+290 8xxx`).
+- **Numbers that begin with `0`** are kept whole where the plan has them —
+  Congolese and Burkinabe mobiles, Panamanian `00800` and Japanese `0037`
+  freephone, old-plan Gabonese numbers — replacing the fixed list of five
+  countries. A trunk `0` written after the calling code is still dropped.
+- **Trunk prefixes for every plan**, including `8` (Russia, Kazakhstan,
+  Belarus, Turkmenistan), `06` (Hungary) and `1` (Marshall Islands), both when
+  parsing a national number and when one is written after the calling code
+  (`+7 8 916 …`, `+36 06 1 …`).
+- **Each country's international access codes** when parsing with a hint:
+  `8 10` from Russia and its neighbours, `010` from Japan, the `00xx` carrier
+  codes of Brazil and Korea, and more, each ordered so that it is never
+  confused with a national number of that country.
+- The README's examples are compiled and run as doctests.
+
+### Fixed
+
+- **NANP: N11 exchanges are valid.** Only area codes are reserved in the N11
+  form; Montserrat's fixed lines are `664-411-xxxx`, and `1-800-411-7246` is a
+  long-running toll-free number. The exchange must still start with 2-9.
+- Kazakh numbers were classified with Russia's ranges, so mobiles came back as
+  fixed lines.
+
+### Performance
+
+Every table the parser consults is folded into flat arrays at compile time: a
+calling code or NANP area code is found by direct index instead of binary
+search, and a length check is a bit test. `is_valid_phone_number`,
+`extract_country` and `detect_phone_number_type` no longer allocate, and a
+`PhoneNumber` holds its E.164 form and its original input in one allocation.
+Against 2.0.0 on the same machine: validation 48-60% faster, country
+extraction 48-56%, type detection 32%, `parse_with_country` 50%, rejected
+parses 30%, `PhoneNumber::parse` 7-16%, and normalization, E.164 and
+international formatting and text extraction 4-15%; national formatting, which
+now does more, takes the same time. The compiled tables add about 80 KB to a
+release binary.
+
 ## [2.0.0] - 2026-07-26
 
 A correctness release. An independent audit of 1.2.0 produced 134 findings — 3

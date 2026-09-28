@@ -5,7 +5,7 @@
 //!
 //! ## Features
 //!
-//! - **Validation** - length- and (for the NANP) range-based validation
+//! - **Validation** - structural (the plan's lengths), with NANP area codes
 //! - **Country detection** - deterministic resolution of the calling code
 //! - **Normalization** - canonical E.164 output
 //! - **Multiple formats** - E.164, international, national, RFC 3966
@@ -43,12 +43,29 @@
 //!
 //! ## Accuracy and scope
 //!
-//! Validation is driven by the country table in this crate: the country
-//! calling code must be known and the national significant number must have a
-//! length that country accepts. For numbers in the North American Numbering
-//! Plan the area code and central office code are additionally checked against
-//! the assigned NANP ranges, which is what makes `US` / `CA` / Caribbean
-//! territory attribution exact.
+//! Validation checks the *structure* of a numbering plan rather than which of
+//! its ranges are allocated today: the country calling code must be known and
+//! the national significant number must have a length the plan uses for some
+//! kind of number — fixed line, mobile, freephone, premium rate and so on. The
+//! lengths are those of Google's libphonenumber metadata, so no number it
+//! considers valid is rejected here; and because allocations change monthly
+//! while lengths change once in a decade, the table does not need chasing to
+//! stay right. A Lebanese number is accepted in any block, but never with 6 or
+//! 10 digits:
+//!
+//! ```rust
+//! use phonelib::{is_valid_phone_number, try_normalize_phone_number, ParseError};
+//!
+//! assert!(is_valid_phone_number("+961 81 123 456"));
+//! assert_eq!(try_normalize_phone_number("+961 123 456"), Err(ParseError::InvalidLength));
+//! ```
+//!
+//! For numbers in the North American Numbering Plan the area code is also
+//! checked against the assigned NANP ranges, which is what makes `US` / `CA` /
+//! Caribbean territory attribution exact. Elsewhere a calling code shared by
+//! several territories is split by each territory's own blocks — `+7 7…` is
+//! Kazakhstan, `+44 1481` Guernsey — and those prefixes only ever choose which
+//! territory is reported, never whether a number is valid.
 //!
 //! **A number must say which country it belongs to.** Give it a leading `+`,
 //! an `00` international access code, or a country via
@@ -59,19 +76,28 @@
 //! `+20 2555 0173`. The exception is calling code 1, where the area code is
 //! checked against the numbering plan, so `12025550173` resolves without a `+`.
 //!
-//! Outside the NANP the crate does **not** carry per-operator prefix ranges, so
-//! a number with a plausible length is accepted even if its prefix is not in
-//! service. If you need full carrier-grade validation for every country, use a
-//! library backed by the complete libphonenumber metadata.
+//! The flip side is that a number of a valid length in a block nobody has
+//! opened yet is accepted. If you need to know a number is in a range that is
+//! *allocated* today, use a library backed by the complete libphonenumber
+//! metadata and keep that metadata current.
 //!
-//! [`detect_phone_number_type`] is likewise metadata-driven. Countries without
-//! a published range table in this crate return [`PhoneNumberType::Unknown`]
-//! rather than a guess. Range tables are carried for the North American
-//! Numbering Plan and for GB, IE, DE, FR, IT, ES, NL, BE, CH, AT, SE, NO, PL,
-//! PT, RU, KZ, TR, IN, CN, JP, KR, AU, NZ, BR, ZA and NG.
+//! [`detect_phone_number_type`] classifies every region from range tables
+//! derived from the same metadata. A number in a block no table claims is
+//! [`PhoneNumberType::Unknown`] rather than a guess, and a number's type never
+//! affects whether it is valid.
+//!
+//! The ITU's non-geographic calling codes — `+800` freephone, `+870` Inmarsat,
+//! `+881`–`+883` networks and the rest — resolve to entries whose `code` is
+//! `"001"`, as in libphonenumber.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+// Compiles and runs every Rust example in the README as a doctest, so the
+// README cannot drift from the crate's actual behaviour.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 use constants::COUNTRIES;
 
@@ -81,6 +107,7 @@ pub use text::ExtractedPhoneNumber;
 mod constants;
 mod definitions;
 mod nanp;
+mod ranges;
 mod text;
 
 #[cfg(test)]
@@ -95,10 +122,10 @@ mod tests;
 // ============================================================================
 
 /// For calling codes shared by more than one entry, the ISO code that owns the
-/// range by default and is therefore returned by [`extract_country`]. Without
-/// it the winner would be an accident of declaration order.
+/// range by default and is therefore returned by [`extract_country`] for every
+/// number that no [`constants::TERRITORY_PREFIXES`] rule gives to a secondary
+/// territory. Without it the winner would be an accident of declaration order.
 ///
-/// Ambiguity length alone cannot resolve is inherent to these ranges;
 /// [`extract_countries`] returns every candidate.
 const PRIMARY_FOR_PREFIX: &[(u32, &str)] = &[
     (1, "US"),
@@ -109,6 +136,7 @@ const PRIMARY_FOR_PREFIX: &[(u32, &str)] = &[
     (61, "AU"),
     (212, "MA"),
     (262, "RE"),
+    (290, "SH"),
     (358, "FI"),
     (500, "FK"),
     (590, "GP"),
@@ -277,14 +305,373 @@ const fn max_national_len() -> usize {
 /// Maximum number of significant digits in an E.164 number.
 const E164_MAX_DIGITS: usize = 15;
 
-/// Every table entry that uses `prefix`, in resolution order.
-fn entries_for_prefix(prefix: u32) -> impl Iterator<Item = &'static Country> {
+/// The `code` of the entries for the ITU's non-geographic calling codes: the
+/// UN M.49 code for the world, as libphonenumber uses.
+const NON_GEOGRAPHIC_CODE: &str = "001";
+
+/// The fewest digits read as a phone number when nothing marks them as one —
+/// no `+`, and no country hint.
+///
+/// Seven is the length of a local subscriber number in most plans. The table
+/// has shorter international numbers — a four-digit Austrian or Iranian
+/// number behind its two-digit calling code is six digits in all — but a bare
+/// run of six digits is an order number, a date or a price far more often
+/// than it is one of those, which therefore have to be written with their `+`.
+pub(crate) const MIN_UNMARKED_DIGITS: usize = 7;
+
+/// `(first position in PREFIX_INDEX, entry count)` for every calling code
+/// below 1000, so finding a code's entries is an array index rather than a
+/// search. A count of 0 means the code is not in the table. The four-digit
+/// NANP territory codes are looked up through [`NANP_AREA_OWNER`] instead.
+static CALLING_CODES: [(u16, u16); 1000] = build_calling_codes();
+
+const fn build_calling_codes() -> [(u16, u16); 1000] {
+    let mut codes = [(0u16, 0u16); 1000];
+    let mut i = 0;
+    while i < COUNTRY_COUNT {
+        let prefix = PREFIX_INDEX[i].0 as usize;
+        if prefix < 1000 {
+            // PREFIX_INDEX is sorted, so a code's entries are contiguous.
+            let (start, count) = codes[prefix];
+            codes[prefix] = if count == 0 {
+                (i as u16, 1)
+            } else {
+                (start, count + 1)
+            };
+        }
+        i += 1;
+    }
+    codes
+}
+
+// Resolution reads a calling code off the front of the digits and stops at the
+// first code it knows. That is only sound because no code is a prefix of
+// another — `7` and `77`, say — which the ITU guarantees and this checks.
+const _: () = {
+    let codes = build_calling_codes();
+    let mut code = 1;
+    while code < 1000 {
+        if codes[code].1 > 0 {
+            let mut shorter = code / 10;
+            while shorter > 0 {
+                assert!(
+                    codes[shorter].1 == 0,
+                    "a calling code is a prefix of another calling code"
+                );
+                shorter /= 10;
+            }
+        }
+        code += 1;
+    }
+};
+
+/// Every table entry that uses `prefix`, as `(prefix, index)`, in resolution
+/// order.
+fn prefix_entries(prefix: u32) -> &'static [(u32, u16)] {
+    if prefix < 1000 {
+        let (start, count) = CALLING_CODES[prefix as usize];
+        return &PREFIX_INDEX[start as usize..(start + count) as usize];
+    }
     let lo = PREFIX_INDEX.partition_point(|&(p, _)| p < prefix);
     let hi = PREFIX_INDEX.partition_point(|&(p, _)| p <= prefix);
-    PREFIX_INDEX[lo..hi]
+    &PREFIX_INDEX[lo..hi]
+}
+
+/// Every table entry that uses `prefix`, in resolution order.
+fn entries_for_prefix(prefix: u32) -> impl Iterator<Item = &'static Country> {
+    prefix_entries(prefix)
         .iter()
         .map(|&(_, idx)| &COUNTRIES[idx as usize])
 }
+
+// ============================================================================
+// Numbering-plan structure
+//
+// What the resolver needs to know about an entry, folded at compile time out
+// of the tables in `constants` into one record per entry, so that a lookup is
+// an array index and a length check is a bit test.
+// ============================================================================
+
+/// The structure of one entry's numbering plan.
+#[derive(Clone, Copy)]
+struct Plan {
+    /// Bit `n` is set when an NSN of `n` digits that does not begin with `0`
+    /// is valid.
+    lengths: u32,
+    /// Bit `n` is set when an NSN of `n` digits that begins with `0` is valid;
+    /// see [`constants::ZERO_LED`].
+    zero_led: u32,
+    /// Whether some NSN begins with `00`, so that `00` cannot be taken for an
+    /// international access code when reading one of the plan's own numbers.
+    double_zero_led: bool,
+    /// Trunk prefix digits, `""` when the plan has none.
+    trunk: &'static str,
+    /// International access codes beyond `00`, `0011` and `011` that no
+    /// national number is dialled like, and those some might be; see
+    /// [`constants::INTERNATIONAL_PREFIXES`].
+    early_access: &'static [&'static str],
+    late_access: &'static [&'static str],
+    /// NSN prefixes that give a number to this entry rather than to the main
+    /// region of its calling code; see [`constants::TERRITORY_PREFIXES`].
+    territory: &'static [&'static str],
+    /// Bit `d` is set when some `territory` prefix starts with the digit `d`,
+    /// so most numbers skip the prefix comparisons altogether.
+    territory_digits: u16,
+    /// Number-type rules; see [`ranges::TYPE_RANGES`].
+    types: &'static [u32],
+    /// For each first digit, the index into [`ranges::TYPES`] of a one-digit
+    /// rule that covers every length, or [`NO_TYPE`]: the common case,
+    /// answered without a search.
+    first_digit_type: [u8; 10],
+}
+
+/// No one-digit rule decides the type; see [`Plan::first_digit_type`].
+const NO_TYPE: u8 = u8::MAX;
+
+impl Plan {
+    /// Whether `nsn` — which must not be empty — has a length this plan uses.
+    ///
+    /// Only a plan with `00…` numbers of its own accepts one: everywhere else
+    /// `00` is the international access code, never the start of a number.
+    #[inline]
+    fn accepts(&self, nsn: &[u8]) -> bool {
+        let mask = if nsn[0] != b'0' {
+            self.lengths
+        } else if nsn.get(1) == Some(&b'0') && !self.double_zero_led {
+            return false;
+        } else {
+            self.zero_led
+        };
+        nsn.len() < 32 && mask & (1 << nsn.len()) != 0
+    }
+
+    #[inline]
+    fn claims(&self, nsn: &[u8]) -> bool {
+        self.territory_digits & (1 << (nsn[0] - b'0')) != 0
+            && self
+                .territory
+                .iter()
+                .any(|prefix| nsn.starts_with(prefix.as_bytes()))
+    }
+}
+
+static PLANS: [Plan; COUNTRY_COUNT] = build_plans();
+
+const fn length_mask(lengths: &[u8]) -> u32 {
+    let mut mask = 0u32;
+    let mut i = 0;
+    while i < lengths.len() {
+        mask |= 1 << lengths[i];
+        i += 1;
+    }
+    mask
+}
+
+const fn build_plans() -> [Plan; COUNTRY_COUNT] {
+    use constants::{INTERNATIONAL_PREFIXES, NATIONAL_PREFIX, TERRITORY_PREFIXES, ZERO_LED};
+
+    let empty = Plan {
+        lengths: 0,
+        zero_led: 0,
+        double_zero_led: false,
+        trunk: "",
+        early_access: &[],
+        late_access: &[],
+        territory: &[],
+        territory_digits: 0,
+        types: &[],
+        first_digit_type: [NO_TYPE; 10],
+    };
+    let mut plans = [empty; COUNTRY_COUNT];
+    let mut i = 0;
+    while i < COUNTRY_COUNT {
+        let country = &COUNTRIES[i];
+        let mut plan = Plan {
+            lengths: length_mask(country.phone_lengths),
+            ..empty
+        };
+
+        let mut j = 0;
+        while j < ZERO_LED.len() {
+            let (code, prefix, zero, other, double_zero) = ZERO_LED[j];
+            if prefix == country.prefix && const_str_eq(code, country.code) {
+                plan.zero_led = length_mask(zero);
+                plan.lengths = length_mask(other);
+                plan.double_zero_led = double_zero;
+            }
+            j += 1;
+        }
+
+        // Calling code 1's trunk `1` is handled by the NANP code.
+        if !is_nanp(country.prefix) {
+            let mut j = 0;
+            while j < NATIONAL_PREFIX.len() {
+                if const_str_eq(NATIONAL_PREFIX[j].0, country.code) {
+                    plan.trunk = NATIONAL_PREFIX[j].1;
+                }
+                j += 1;
+            }
+        }
+
+        let mut j = 0;
+        while j < INTERNATIONAL_PREFIXES.len() {
+            let (code, early, late) = INTERNATIONAL_PREFIXES[j];
+            if const_str_eq(code, country.code) {
+                plan.early_access = early;
+                plan.late_access = late;
+            }
+            j += 1;
+        }
+
+        let mut j = 0;
+        while j < TERRITORY_PREFIXES.len() {
+            if const_str_eq(TERRITORY_PREFIXES[j].0, country.code) {
+                let prefixes = TERRITORY_PREFIXES[j].1;
+                plan.territory = prefixes;
+                let mut k = 0;
+                while k < prefixes.len() {
+                    plan.territory_digits |= 1 << (prefixes[k].as_bytes()[0] - b'0');
+                    k += 1;
+                }
+            }
+            j += 1;
+        }
+
+        let mut j = 0;
+        while j < ranges::TYPE_RANGES.len() {
+            let (code, prefix, rules) = ranges::TYPE_RANGES[j];
+            if prefix == country.prefix && const_str_eq(code, country.code) {
+                plan.types = rules;
+                let mut r = 0;
+                while r < rules.len() {
+                    let (key, lengths) = (rules[r] >> 16, rules[r] & 0xFFF);
+                    if key < 10 && lengths == 0 {
+                        plan.first_digit_type[key as usize] = (rules[r] >> 12 & 0xF) as u8;
+                    }
+                    r += 1;
+                }
+            }
+            j += 1;
+        }
+
+        plans[i] = plan;
+        i += 1;
+    }
+    plans
+}
+
+// The side tables are keyed by ISO code, so a typo would silently do nothing.
+// Check every key, that each zero-led split adds up to the entry's lengths,
+// and that each range table is sorted, since classification binary-searches
+// it.
+const _: () = {
+    use constants::{
+        EXTRA_NATIONAL_PREFIXES, INTERNATIONAL_PREFIXES, NATIONAL_FORMAT_PREFIX, NATIONAL_PREFIX,
+        TERRITORY_PREFIXES, ZERO_LED,
+    };
+
+    /// `true` when some entry has `code`, and — if `prefix` is not 0 — that
+    /// calling code.
+    const fn has_entry(code: &str, prefix: u32) -> bool {
+        let mut i = 0;
+        while i < COUNTRY_COUNT {
+            if const_str_eq(COUNTRIES[i].code, code)
+                && (prefix == 0 || COUNTRIES[i].prefix == prefix)
+            {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    let mut j = 0;
+    while j < ranges::TYPE_RANGES.len() {
+        let (code, prefix, rules) = ranges::TYPE_RANGES[j];
+        assert!(has_entry(code, prefix), "a TYPE_RANGES row names no entry");
+        let mut r = 1;
+        while r < rules.len() {
+            assert!(rules[r - 1] < rules[r], "TYPE_RANGES rules must be sorted");
+            r += 1;
+        }
+        j += 1;
+    }
+
+    let mut j = 0;
+    while j < ZERO_LED.len() {
+        let (code, prefix, zero, other, _) = ZERO_LED[j];
+        let mut found = false;
+        let mut i = 0;
+        while i < COUNTRY_COUNT {
+            if COUNTRIES[i].prefix == prefix && const_str_eq(COUNTRIES[i].code, code) {
+                found = true;
+                assert!(
+                    length_mask(zero) | length_mask(other)
+                        == length_mask(COUNTRIES[i].phone_lengths),
+                    "a ZERO_LED row does not add up to its entry's phone_lengths"
+                );
+            }
+            i += 1;
+        }
+        assert!(found, "a ZERO_LED row names no entry");
+        j += 1;
+    }
+
+    let mut j = 0;
+    while j < NATIONAL_PREFIX.len() {
+        assert!(
+            has_entry(NATIONAL_PREFIX[j].0, 0),
+            "unknown code in NATIONAL_PREFIX"
+        );
+        j += 1;
+    }
+    let mut j = 0;
+    while j < EXTRA_NATIONAL_PREFIXES.len() {
+        assert!(
+            has_entry(EXTRA_NATIONAL_PREFIXES[j].0, 0),
+            "unknown code in EXTRA_NATIONAL_PREFIXES"
+        );
+        j += 1;
+    }
+    // Looked up by binary search on the calling code.
+    let mut j = 1;
+    while j < NATIONAL_FORMAT_PREFIX.len() {
+        assert!(
+            NATIONAL_FORMAT_PREFIX[j - 1].0 < NATIONAL_FORMAT_PREFIX[j].0,
+            "NATIONAL_FORMAT_PREFIX must be sorted by calling code"
+        );
+        j += 1;
+    }
+    let mut j = 0;
+    while j < INTERNATIONAL_PREFIXES.len() {
+        assert!(
+            has_entry(INTERNATIONAL_PREFIXES[j].0, 0),
+            "unknown code in INTERNATIONAL_PREFIXES"
+        );
+        j += 1;
+    }
+
+    // A territory rule only means something for a secondary entry: the main
+    // region already takes every number no rule claims.
+    let mut j = 0;
+    while j < TERRITORY_PREFIXES.len() {
+        let code = TERRITORY_PREFIXES[j].0;
+        let mut i = 0;
+        let mut found = false;
+        while i < COUNTRY_COUNT {
+            if const_str_eq(COUNTRIES[i].code, code) {
+                found = true;
+                assert!(
+                    primary_rank(i) == 1 && build_calling_codes()[COUNTRIES[i].prefix as usize].1 > 1,
+                    "TERRITORY_PREFIXES names an entry that does not share its calling code as a secondary"
+                );
+            }
+            i += 1;
+        }
+        assert!(found, "unknown code in TERRITORY_PREFIXES");
+        j += 1;
+    }
+};
 
 // ============================================================================
 // Input preparation: extensions, vanity letters, digit extraction
@@ -304,8 +691,12 @@ fn split_extension(input: &str) -> (&str, Option<&str>) {
     for i in 0..bytes.len() {
         let at_word_start = i == 0 || !bytes[i - 1].is_ascii_alphabetic();
 
-        // A marker only counts once some digits have been seen.
-        if !at_word_start || !seen_digit {
+        // A marker only counts once some digits have been seen, and every
+        // marker starts with a letter or one of `#`, `,` and `;`.
+        if !at_word_start
+            || !seen_digit
+            || !(bytes[i].is_ascii_alphabetic() || matches!(bytes[i], b'#' | b',' | b';'))
+        {
             seen_digit |= bytes[i].is_ascii_digit();
             continue;
         }
@@ -419,7 +810,7 @@ struct Digits {
     buf: [u8; 32],
     len: usize,
     /// Whether the input marked itself as an international number, by a leading
-    /// `+` or by the `00` access code. See [`parse_internal`] for why it
+    /// `+` or by the `00` access code. See [`resolve_input`] for why it
     /// matters.
     explicit_international: bool,
 }
@@ -429,20 +820,64 @@ impl Digits {
         &self.buf[..self.len]
     }
 
-    fn as_str(&self) -> &str {
-        // Infallible: the buffer only ever receives ASCII digit bytes.
-        std::str::from_utf8(self.as_slice()).expect("digit buffer is ASCII")
+    /// `calling_code` followed by `national`: a number read in a country's
+    /// national format, rewritten as the global number it stands for.
+    fn global(calling_code: u32, national: &[u8]) -> Result<Self, ParseError> {
+        let mut out = Digits {
+            buf: [0u8; 32],
+            len: prefix_digit_count(calling_code),
+            explicit_international: true,
+        };
+        let mut code = calling_code;
+        for slot in out.buf[..out.len].iter_mut().rev() {
+            *slot = b'0' + (code % 10) as u8;
+            code /= 10;
+        }
+        if out.len + national.len() > E164_MAX_DIGITS {
+            return Err(ParseError::TooLong);
+        }
+        out.buf[out.len..out.len + national.len()].copy_from_slice(national);
+        out.len += national.len();
+        Ok(out)
     }
 }
 
-/// Validate the characters of `input` and extract its significant digits.
+/// Validate the characters of `input` and extract its significant digits, with
+/// any international access code stripped; see [`scan_digits`].
+fn extract_digits(input: &str) -> Result<Digits, ParseError> {
+    let mut out = scan_digits(input)?;
+
+    // Strip the zeros an access code leaves before the calling code ("0044…").
+    // The "011…" form needs country context and is left to
+    // `PhoneNumber::try_parse_with_country`.
+    let start = leading_zeros(out.as_slice());
+    if start >= out.len {
+        return Err(ParseError::Empty);
+    }
+    if start > 0 {
+        // One zero is a national trunk prefix; two or more can only be the
+        // international access code, since no national number starts with `00`.
+        out.explicit_international |= start >= 2;
+        out.buf.copy_within(start..out.len, 0);
+        out.len -= start;
+    }
+
+    if out.len > E164_MAX_DIGITS {
+        return Err(ParseError::TooLong);
+    }
+
+    Ok(out)
+}
+
+/// Validate the characters of `input` and collect its digits exactly as
+/// written.
 ///
 /// Vanity letters are only converted when the input already looks like a phone
 /// number — at least three digits must precede the first letter. That is what
 /// stops arbitrary prose such as `"HELLO WORLD"` from being read as a number.
 /// Any other character is rejected, so validation and normalization can never
 /// disagree about what is acceptable.
-fn extract_digits(input: &str) -> Result<Digits, ParseError> {
+fn scan_digits(input: &str) -> Result<Digits, ParseError> {
     const VANITY_MIN_LEADING_DIGITS: usize = 3;
 
     let mut out = Digits {
@@ -503,28 +938,6 @@ fn extract_digits(input: &str) -> Result<Digits, ParseError> {
         return Err(ParseError::Empty);
     }
 
-    // Strip the zeros an access code leaves before the calling code ("0044…").
-    // The "011…" form needs country context and is left to
-    // `PhoneNumber::try_parse_with_country`.
-    let mut start = 0;
-    while start < out.len && out.buf[start] == b'0' {
-        start += 1;
-    }
-    if start >= out.len {
-        return Err(ParseError::Empty);
-    }
-    if start > 0 {
-        // One zero is a national trunk prefix; two or more can only be the
-        // international access code, since no national number starts with `00`.
-        out.explicit_international |= start >= 2;
-        out.buf.copy_within(start..out.len, 0);
-        out.len -= start;
-    }
-
-    if out.len > E164_MAX_DIGITS {
-        return Err(ParseError::TooLong);
-    }
-
     Ok(out)
 }
 
@@ -535,10 +948,11 @@ fn extract_digits(input: &str) -> Result<Digits, ParseError> {
 /// A resolved number: which country owns it and where its national significant
 /// number starts within the digit string.
 struct Resolved {
+    /// Index of the owning entry in `COUNTRIES` (and `PLANS`).
+    index: usize,
     country: &'static Country,
-    prefix_len: usize,
-    /// Offset of the national significant number, at or after `prefix_len`.
-    /// Greater than `prefix_len` when a national trunk zero was stripped.
+    /// Offset of the national significant number: just past the calling code,
+    /// or further when a national trunk prefix was stripped.
     national_start: usize,
 }
 
@@ -547,80 +961,183 @@ fn leading_zeros(digits: &[u8]) -> usize {
     digits.iter().take_while(|&&b| b == b'0').count()
 }
 
-/// Countries whose national significant number legitimately starts with `0`.
-///
-/// Everywhere else a leading zero is a trunk prefix and is stripped. Here it is
-/// part of the number: `IT` (`+39 06 …`, and `VA` shares the plan), `SM`
-/// (`0549 xxxxxx`), `CI` and `BJ` (post-renumbering, zero mandatory from
-/// abroad). Writing the zero nationally is not enough to qualify — Gabon does,
-/// but the ITU has international callers dial the digits after it.
-const LEADING_ZERO_SIGNIFICANT: &[&str] = &["BJ", "CI", "IT", "SM", "VA"];
-
-fn leading_zero_significant(code: &str) -> bool {
-    LEADING_ZERO_SIGNIFICANT.contains(&code)
-}
-
 /// Resolve the country for a digit string.
 ///
 /// Country calling codes are prefix-free outside the NANP, so the calling code
-/// is determined by the digits alone; only the reading of a leading zero on the
-/// national part varies, and that is decided per country by
-/// [`LEADING_ZERO_SIGNIFICANT`].
+/// is determined by the digits alone; [`resolve_national`] does the rest.
 fn resolve_country(digits: &[u8]) -> Result<Resolved, ParseError> {
-    if digits.is_empty() {
-        return Err(ParseError::Empty);
+    match digits.first() {
+        None => return Err(ParseError::Empty),
+        // No calling code starts with 0.
+        Some(b'0') => return Err(ParseError::UnknownCountryCode),
+        Some(b'1') => return resolve_nanp(digits),
+        Some(_) => {}
     }
-
-    if digits[0] == b'1' {
-        return resolve_nanp(digits);
-    }
-
-    let mut saw_prefix = false;
 
     for prefix_len in 1..=3usize {
         if digits.len() <= prefix_len {
             break;
         }
-        let prefix = prefix_value(&digits[..prefix_len]);
-        let zeros = leading_zeros(&digits[prefix_len..]);
-
-        for country in entries_for_prefix(prefix) {
-            saw_prefix = true;
-
-            // Where the zero is not significant it is a trunk prefix, so
-            // keeping it is not an alternative reading at all.
-            let (starts, count) = if zeros == 0 {
-                ([prefix_len, 0], 1)
-            } else if leading_zero_significant(country.code) {
-                ([prefix_len, prefix_len + zeros], 2)
-            } else {
-                ([prefix_len + zeros, 0], 1)
-            };
-
-            for &national_start in &starts[..count] {
-                let national_len = digits.len() - national_start;
-                if country.phone_lengths.contains(&(national_len as u8)) {
-                    return Ok(Resolved {
-                        country,
-                        prefix_len,
-                        national_start,
-                    });
-                }
-            }
+        let entries = prefix_entries(prefix_value(&digits[..prefix_len]));
+        if !entries.is_empty() {
+            // No other calling code can match: none is a prefix of another.
+            return resolve_national(entries, digits, prefix_len);
         }
     }
 
-    if saw_prefix {
-        Err(ParseError::InvalidLength)
+    Err(ParseError::UnknownCountryCode)
+}
+
+/// Whether some entry among `entries` â€” the entries sharing one calling code â€”
+/// accepts `nsn` as a national significant number.
+#[inline]
+fn any_accepts(entries: &[(u32, u16)], nsn: &[u8]) -> bool {
+    !nsn.is_empty() && entries.iter().any(|&(_, i)| PLANS[i as usize].accepts(nsn))
+}
+
+/// Find the national significant number behind a calling code, and the entry
+/// it belongs to.
+///
+/// The digits after the calling code are the NSN as written, unless they start
+/// with a trunk prefix copied from the national format (`+44 (0)20 â€¦`,
+/// `+7 8 916 â€¦`, `+36 06 1 â€¦`). A leading `0` is the delicate case, because in
+/// a few plans the NSN itself begins with one ([`constants::ZERO_LED`]). Where
+/// the plan's trunk prefix is `0`, a single zero is read as that trunk first
+/// and `00` as part of the number; where it has none, the zero is kept first.
+/// Either way the other reading is the fallback, and a reading only counts if
+/// the plan has numbers of its length.
+fn resolve_national(
+    entries: &'static [(u32, u16)],
+    digits: &[u8],
+    prefix_len: usize,
+) -> Result<Resolved, ParseError> {
+    let national = &digits[prefix_len..];
+    let trunk = PLANS[entries[0].1 as usize].trunk.as_bytes();
+    let zeros = leading_zeros(national);
+
+    let offset = if zeros == 0 {
+        if any_accepts(entries, national) {
+            Some(0)
+        } else if !trunk.is_empty()
+            && national.starts_with(trunk)
+            && any_accepts(entries, &national[trunk.len()..])
+        {
+            Some(trunk.len())
+        } else {
+            None
+        }
     } else {
-        Err(ParseError::UnknownCountryCode)
+        // A trunk prefix is a single `0` — or Hungary's `06` — never two
+        // zeros: what follows `00` is not a national number with its trunk.
+        let strip = if trunk.len() > 1 && national.starts_with(trunk) {
+            trunk.len()
+        } else {
+            1
+        };
+        let keep_first = trunk.first() != Some(&b'0') || zeros >= 2;
+        let order = if keep_first { [0, strip] } else { [strip, 0] };
+        order
+            .into_iter()
+            .find(|&start| any_accepts(entries, &national[start..]))
+    };
+
+    let offset = offset.ok_or(ParseError::InvalidLength)?;
+    let index = attribute(entries, &national[offset..]);
+    Ok(Resolved {
+        index,
+        country: &COUNTRIES[index],
+        national_start: prefix_len + offset,
+    })
+}
+
+/// The entry `nsn` belongs to among the `entries` sharing its calling code: a
+/// secondary territory whose prefix it starts with, otherwise the first entry â€”
+/// the main region â€” whose plan has numbers of its length.
+fn attribute(entries: &[(u32, u16)], nsn: &[u8]) -> usize {
+    if let [(_, only)] = entries {
+        return *only as usize;
     }
+    let mut fallback = None;
+    for &(_, i) in entries {
+        let plan = &PLANS[i as usize];
+        if !plan.accepts(nsn) {
+            continue;
+        }
+        if plan.claims(nsn) {
+            return i as usize;
+        }
+        fallback.get_or_insert(i as usize);
+    }
+    fallback.unwrap_or(entries[0].1 as usize)
+}
+
+/// For every NANP area code, the entry that owns it, or [`NO_OWNER`] when the
+/// code is unassigned. A territory owns its four-digit `1XXX` entry and the US
+/// and Canada their shared `1` ones. NANP-wide service codes â€” toll-free,
+/// premium rate, personal numbering â€” belong to no country and fall to the
+/// primary `+1` entry, leaving classification to report the service.
+static NANP_AREA_OWNER: [u16; 1000] = build_nanp_area_owner();
+
+const NO_OWNER: u16 = u16::MAX;
+
+const fn build_nanp_area_owner() -> [u16; 1000] {
+    let mut us = NO_OWNER;
+    let mut ca = NO_OWNER;
+    let mut i = 0;
+    while i < COUNTRY_COUNT {
+        if COUNTRIES[i].prefix == 1 {
+            if const_str_eq(COUNTRIES[i].code, "US") {
+                us = i as u16;
+            } else if const_str_eq(COUNTRIES[i].code, "CA") {
+                ca = i as u16;
+            }
+        }
+        i += 1;
+    }
+    assert!(
+        us != NO_OWNER && ca != NO_OWNER,
+        "the +1 entries are missing"
+    );
+
+    let mut owner = [NO_OWNER; 1000];
+    let mut j = 0;
+    while j < nanp::NANP_AREA_CODES.len() {
+        let (area, iso) = nanp::NANP_AREA_CODES[j];
+        owner[area as usize] = if const_str_eq(iso, "CA") { ca } else { us };
+        j += 1;
+    }
+
+    let mut i = 0;
+    while i < COUNTRY_COUNT {
+        let prefix = COUNTRIES[i].prefix;
+        if is_nanp_territory(prefix) {
+            owner[(prefix - 1000) as usize] = i as u16;
+        }
+        i += 1;
+    }
+
+    // Every territory tag in the area-code table must have reached its entry;
+    // otherwise its numbers would silently be attributed to the US.
+    let mut j = 0;
+    while j < nanp::NANP_AREA_CODES.len() {
+        let (area, iso) = nanp::NANP_AREA_CODES[j];
+        let is_territory =
+            !const_str_eq(iso, "US") && !const_str_eq(iso, "CA") && !nanp::is_non_geographic(iso);
+        if is_territory {
+            assert!(
+                COUNTRIES[owner[area as usize] as usize].prefix == 1000 + area as u32,
+                "a NANP territory area code has no four-digit entry in COUNTRIES"
+            );
+        }
+        j += 1;
+    }
+    owner
 }
 
 /// Resolve a `+1` number using the assigned NANP area codes.
 ///
 /// Length alone cannot tell the United States, Canada and the Caribbean
-/// territories apart — they all use `1` + 10 digits. Checking the area code
+/// territories apart â€” they all use `1` + 10 digits. Checking the area code
 /// against the numbering plan makes the attribution exact and rejects
 /// structurally impossible numbers such as `+1 111 111 1111`.
 fn resolve_nanp(digits: &[u8]) -> Result<Resolved, ParseError> {
@@ -641,38 +1158,23 @@ fn resolve_nanp(digits: &[u8]) -> Result<Resolved, ParseError> {
         return Err(ParseError::InvalidExchange);
     }
 
-    let iso = nanp::country_for_area_code(area).ok_or(ParseError::InvalidAreaCode)?;
+    let owner = NANP_AREA_OWNER[area as usize];
+    if owner == NO_OWNER {
+        return Err(ParseError::InvalidAreaCode);
+    }
+    let country = &COUNTRIES[owner as usize];
 
     // Territories have their own four-digit calling code entry (1268 = AG);
     // the US and Canada share the bare `1`.
-    let territory_prefix = 1000 + area as u32;
-    if let Some(country) = entries_for_prefix(territory_prefix)
-        .find(|c| c.phone_lengths.contains(&((NANP_NSN_LEN - 3) as u8)))
-    {
-        return Ok(Resolved {
-            country,
-            prefix_len: 4,
-            national_start: 4,
-        });
-    }
-
-    let country = if nanp::is_non_geographic(iso) {
-        // NANP-wide service ranges belong to no country; fall back to the
-        // primary `+1` entry and let classification report the service class.
-        entries_for_prefix(1).next()
+    let prefix_len = if is_nanp_territory(country.prefix) {
+        4
     } else {
-        entries_for_prefix(1).find(|c| c.code == iso)
-    }
-    .ok_or(ParseError::UnknownCountryCode)?;
-
-    if !country.phone_lengths.contains(&(NANP_NSN_LEN as u8)) {
-        return Err(ParseError::InvalidLength);
-    }
-
+        1
+    };
     Ok(Resolved {
+        index: owner as usize,
         country,
-        prefix_len: 1,
-        national_start: 1,
+        national_start: prefix_len,
     })
 }
 
@@ -708,48 +1210,77 @@ struct Parsed {
     extension: Option<String>,
 }
 
-/// Parse, validate and normalize in a single pass.
+impl Parsed {
+    /// `spare` is extra capacity to reserve in `normalized`, for a caller that
+    /// will append to it.
+    fn new(digits: &[u8], resolved: &Resolved, extension: Option<&str>, spare: usize) -> Self {
+        let normalized = normalized(digits, resolved, spare);
+        let national = &normalized[1 + prefix_digit_count(resolved.country.prefix)..];
+        let phone_type = classify_phone_number_type(national, resolved.index);
+        Parsed {
+            normalized,
+            country: resolved.country,
+            phone_type,
+            extension: extension.map(str::to_string),
+        }
+    }
+}
+
+/// Validate and resolve `input` without building anything, which is all that
+/// validation and country lookup need.
 ///
-/// Input that does not mark itself as international — no `+`, no `00` access
-/// code — is only accepted when the resolution is *checked* rather than guessed,
+/// Input that does not mark itself as international â€” no `+`, no `00` access
+/// code â€” is only accepted when the resolution is *checked* rather than guessed,
 /// which today means the North American Numbering Plan, where the area code is
 /// verified against the assigned ranges. Everywhere else, reading the leading
 /// digits as a calling code is indistinguishable from a national number that
 /// happens to start with those digits, and answering anyway turns a US number
 /// into an Egyptian one. See [`ParseError::MissingCallingCode`].
-fn parse_internal(input: &str) -> Result<Parsed, ParseError> {
+fn resolve_input(input: &str) -> Result<(Digits, Resolved, Option<&str>), ParseError> {
     let input = strip_tel_uri(input.trim());
     let (base, extension) = split_extension(input);
     let digits = extract_digits(base)?;
-    let slice = digits.as_slice();
+    let resolved = resolve_digits(digits.as_slice(), digits.explicit_international)?;
+    Ok((digits, resolved, extension))
+}
 
+/// Resolve a digit string that starts with its calling code.
+fn resolve_digits(digits: &[u8], explicit_international: bool) -> Result<Resolved, ParseError> {
     // Early-out with a better error than the resolver would give; the floor is
     // the shortest national number plus at least one calling-code digit.
-    if slice.len() < MIN_NATIONAL_LEN + 1 {
+    if digits.len() < MIN_NATIONAL_LEN + 1 {
         return Err(ParseError::TooShort);
     }
 
-    let resolved = resolve_country(slice)?;
+    let resolved = resolve_country(digits)?;
 
-    if !digits.explicit_international && !is_nanp(resolved.country.prefix) {
+    if !explicit_international && !is_nanp(resolved.country.prefix) {
         return Err(ParseError::MissingCallingCode);
     }
+    Ok(resolved)
+}
 
-    let national = &digits.as_str()[resolved.national_start..];
+/// The national significant number of a resolved digit string.
+fn national_digits<'a>(digits: &'a [u8], resolved: &Resolved) -> &'a str {
+    // Infallible: digit buffers only ever hold ASCII digits.
+    std::str::from_utf8(&digits[resolved.national_start..]).expect("digits are ASCII")
+}
 
-    let mut normalized = String::with_capacity(national.len() + 5);
-    normalized.push('+');
-    push_prefix_digits(&mut normalized, resolved.country.prefix);
-    normalized.push_str(national);
+/// The E.164 form of a resolved digit string, with `spare` bytes of capacity
+/// left over.
+fn normalized(digits: &[u8], resolved: &Resolved, spare: usize) -> String {
+    let national = national_digits(digits, resolved);
+    let mut out = String::with_capacity(national.len() + 5 + spare);
+    out.push('+');
+    push_prefix_digits(&mut out, resolved.country.prefix);
+    out.push_str(national);
+    out
+}
 
-    let phone_type = classify_phone_number_type(national, resolved.country);
-
-    Ok(Parsed {
-        normalized,
-        country: resolved.country,
-        phone_type,
-        extension: extension.map(str::to_string),
-    })
+/// Parse, validate, normalize and classify in a single pass.
+fn parse_internal(input: &str) -> Result<Parsed, ParseError> {
+    let (digits, resolved, extension) = resolve_input(input)?;
+    Ok(Parsed::new(digits.as_slice(), &resolved, extension, 0))
 }
 
 /// Validates whether a phone number is valid.
@@ -774,7 +1305,7 @@ fn parse_internal(input: &str) -> Result<Parsed, ParseError> {
 /// ```
 #[must_use]
 pub fn is_valid_phone_number(phone_number: &str) -> bool {
-    parse_internal(phone_number).is_ok()
+    resolve_input(phone_number).is_ok()
 }
 
 /// Normalizes a phone number to E.164 format.
@@ -826,7 +1357,8 @@ pub fn normalize_phone_number(phone_number: &str) -> Option<String> {
 /// );
 /// ```
 pub fn try_normalize_phone_number(phone_number: &str) -> Result<String, ParseError> {
-    parse_internal(phone_number).map(|p| p.normalized)
+    let (digits, resolved, _) = resolve_input(phone_number)?;
+    Ok(normalized(digits.as_slice(), &resolved, 0))
 }
 
 /// Normalizes a phone number in place to E.164 format.
@@ -873,15 +1405,19 @@ pub fn normalize_phone_number_in_place(phone_number: &mut String) -> Option<Stri
 /// ```
 #[must_use]
 pub fn extract_country(phone_number: &str) -> Option<&'static Country> {
-    parse_internal(phone_number).ok().map(|p| p.country)
+    resolve_input(phone_number)
+        .ok()
+        .map(|(_, resolved, _)| resolved.country)
 }
 
 /// Every country whose numbering plan could account for this number.
 ///
 /// Some calling codes are shared by countries that a number's length cannot
 /// distinguish (`+7` is Russia and Kazakhstan, `+44` is the UK, Guernsey, the
-/// Isle of Man and Jersey). [`extract_country`] returns the primary one; this
-/// returns all of them, most likely first.
+/// Isle of Man and Jersey). [`extract_country`] returns the one the number's
+/// prefix points to — the main region unless a secondary territory's own
+/// block claims it; this returns every territory the length fits, that one
+/// first.
 ///
 /// Numbers under calling code 1 always yield exactly one country: the NANP area
 /// code identifies it unambiguously.
@@ -896,6 +1432,13 @@ pub fn extract_country(phone_number: &str) -> Option<&'static Country> {
 ///     .collect();
 /// assert_eq!(codes, vec!["RU", "KZ"]);
 ///
+/// // Kazakh numbers start with 7, so the prefix points to Kazakhstan first.
+/// let codes: Vec<_> = extract_countries("+77012345678")
+///     .iter()
+///     .map(|c| c.code)
+///     .collect();
+/// assert_eq!(codes, vec!["KZ", "RU"]);
+///
 /// // The NANP area code leaves no ambiguity.
 /// let codes: Vec<_> = extract_countries("+14165550198")
 ///     .iter()
@@ -905,7 +1448,7 @@ pub fn extract_country(phone_number: &str) -> Option<&'static Country> {
 /// ```
 #[must_use]
 pub fn extract_countries(phone_number: &str) -> Vec<&'static Country> {
-    let Ok((digits, resolved)) = parse_for_candidates(phone_number) else {
+    let Ok((digits, resolved, _)) = resolve_input(phone_number) else {
         return Vec::new();
     };
 
@@ -914,22 +1457,16 @@ pub fn extract_countries(phone_number: &str) -> Vec<&'static Country> {
         return vec![resolved.country];
     }
 
-    let national_len = digits.len() - resolved.national_start;
-    let prefix = prefix_value(&digits[..resolved.prefix_len]);
-
-    entries_for_prefix(prefix)
-        .filter(|c| c.phone_lengths.contains(&(national_len as u8)))
-        .collect()
-}
-
-fn parse_for_candidates(input: &str) -> Result<(Vec<u8>, Resolved), ParseError> {
-    let (base, _) = split_extension(strip_tel_uri(input.trim()));
-    let digits = extract_digits(base)?;
-    let resolved = resolve_country(digits.as_slice())?;
-    if !digits.explicit_international && !is_nanp(resolved.country.prefix) {
-        return Err(ParseError::MissingCallingCode);
-    }
-    Ok((digits.as_slice().to_vec(), resolved))
+    let nsn = &digits.as_slice()[resolved.national_start..];
+    let mut candidates = vec![resolved.country];
+    candidates.extend(
+        prefix_entries(resolved.country.prefix)
+            .iter()
+            .filter(|&&(_, i)| PLANS[i as usize].accepts(nsn))
+            .map(|&(_, i)| &COUNTRIES[i as usize])
+            .filter(|&country| country != resolved.country),
+    );
+    candidates
 }
 
 // ============================================================================
@@ -964,7 +1501,27 @@ pub fn countries() -> &'static [Country] {
 /// ```
 #[must_use]
 pub fn country_by_code(code: &str) -> Option<&'static Country> {
-    COUNTRIES.iter().find(|c| c.code.eq_ignore_ascii_case(code))
+    country_index(code).map(|i| &COUNTRIES[i])
+}
+
+fn country_index(code: &str) -> Option<usize> {
+    COUNTRIES
+        .iter()
+        .position(|c| c.code.eq_ignore_ascii_case(code))
+}
+
+/// The first reading that parses, or the error of the first one.
+fn first_ok<T>(readings: Vec<Result<T, ParseError>>) -> Result<T, ParseError> {
+    let mut first_error = None;
+    for reading in readings {
+        match reading {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    Err(first_error.unwrap_or(ParseError::Empty))
 }
 
 /// Every table entry for an ISO 3166-1 alpha-2 code.
@@ -1011,67 +1568,81 @@ pub enum PhoneFormat {
     /// International: `+1 202 555 0173`
     International,
     /// National, including the country's trunk prefix where it has one:
-    /// `(202) 555-0173`, `020 7946 0958`
+    /// `(202) 555-0173`, `020 7946 0958`. A number under one of the ITU's
+    /// non-geographic calling codes (`+800` freephone, `+870` Inmarsat, …) has
+    /// no national form and is written as in `International`.
     National,
     /// RFC 3966 `tel:` URI: `tel:+12025550173`, with `;ext=` when the number
     /// carries an extension.
     RFC3966,
 }
 
-/// National trunk prefix by ISO code, for countries that use one.
-///
-/// Countries absent from this table either have no trunk prefix (Italy, Spain,
-/// Denmark, Norway, Portugal) or are not yet covered, in which case the
-/// national format is the grouped national significant number alone.
-const NATIONAL_PREFIX: &[(&str, &str)] = &[
-    ("AT", "0"),
-    ("AU", "0"),
-    ("BE", "0"),
-    ("BR", "0"),
-    ("CH", "0"),
-    ("CN", "0"),
-    ("DE", "0"),
-    ("FR", "0"),
-    ("GB", "0"),
-    ("GG", "0"),
-    ("IE", "0"),
-    ("IM", "0"),
-    ("IN", "0"),
-    ("JE", "0"),
-    ("JP", "0"),
-    ("KR", "0"),
-    ("NG", "0"),
-    ("NL", "0"),
-    ("NZ", "0"),
-    // Poland abolished its trunk prefix in 2009; numbers are dialled as the
-    // bare nine digits, so `PL` deliberately has no entry here.
-    ("SE", "0"),
-    ("TR", "0"),
-    ("ZA", "0"),
-    ("RU", "8"),
-];
-
-/// What goes between the trunk prefix and the number when writing a national
-/// number.
-///
-/// Nearly every plan joins the trunk `0` straight onto the area code
-/// (`020 7946 0958`). Russia's trunk `8` is written as its own token
-/// (`8 916 123-45-67`), so gluing it produces `8916 …`, which reads as a
-/// four-digit area code.
-fn trunk_separator(code: &str) -> &'static str {
-    if code == "RU" {
-        " "
-    } else {
-        ""
-    }
-}
-
+/// The trunk prefix digits of `code`'s plan, `""` when it has none.
 fn national_prefix_for(code: &str) -> &'static str {
-    NATIONAL_PREFIX
+    constants::NATIONAL_PREFIX
         .iter()
         .find(|(c, _)| *c == code)
-        .map(|(_, p)| *p)
-        .unwrap_or("")
+        .map_or("", |(_, p)| *p)
+}
+
+/// What is written in front of the first group of `national`, a national
+/// significant number under `calling_code`; see
+/// [`constants::NATIONAL_FORMAT_PREFIX`].
+fn national_format_prefix(calling_code: u32, national: &str) -> &'static str {
+    let table = constants::NATIONAL_FORMAT_PREFIX;
+    let Ok(row) = table.binary_search_by_key(&calling_code, |&(code, _, _)| code) else {
+        return "";
+    };
+    let (_, usual, exceptions) = table[row];
+    exceptions
+        .iter()
+        .filter(|(prefix, _)| national.starts_with(prefix))
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map_or(usual, |&(_, written)| written)
+}
+
+/// Whether `national` written behind `prefix` still reads back as itself.
+///
+/// It does not where the plan has no trunk prefix of its own and the written
+/// `0` followed by the number is itself one of the plan's `0…` numbers:
+/// Gabon's seven-digit `790 3896` against its old-plan `0790 3896`. Such a
+/// number is written without the prefix, so its national form stays
+/// unambiguous.
+fn reads_back(country: &Country, prefix: &str, national: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    let written = || {
+        prefix
+            .bytes()
+            .filter(u8::is_ascii_digit)
+            .chain(national.bytes())
+    };
+    // Nor as a number dialled out through one of the plan's access codes:
+    // Russia's `8` in front of a number starting `10` would read as `8 10`.
+    let entries = prefix_entries(country.prefix);
+    let Some(&(_, own)) = entries
+        .iter()
+        .find(|&&(_, i)| COUNTRIES[i as usize].code == country.code)
+    else {
+        return true;
+    };
+    let dialled_out = PLANS[own as usize].early_access.iter().any(|code| {
+        let mut digits = written();
+        code.bytes().all(|digit| digits.next() == Some(digit))
+    });
+    if dialled_out {
+        return false;
+    }
+
+    let zeros = prefix.bytes().filter(|&b| b == b'0').count();
+    if zeros == 0 || !PLANS[entries[0].1 as usize].trunk.is_empty() {
+        return true;
+    }
+    let written_len = written().count();
+    !entries
+        .iter()
+        .any(|&(_, i)| written_len < 32 && PLANS[i as usize].zero_led & (1 << written_len) != 0)
 }
 
 /// Format a phone number according to the specified format.
@@ -1102,11 +1673,11 @@ fn national_prefix_for(code: &str) -> &'static str {
 /// ```
 #[must_use]
 pub fn format_phone_number(phone_number: &str, format: PhoneFormat) -> Option<String> {
-    let parsed = parse_internal(phone_number).ok()?;
+    let (digits, resolved, extension) = resolve_input(phone_number).ok()?;
     Some(render(
-        &parsed.normalized,
-        parsed.country,
-        parsed.extension.as_deref(),
+        &normalized(digits.as_slice(), &resolved, 0),
+        resolved.country,
+        extension,
         format,
     ))
 }
@@ -1139,15 +1710,30 @@ fn render(
         }
 
         PhoneFormat::National => {
+            // A non-geographic number is dialled the same way from everywhere,
+            // so the international form is the only one it has.
+            if country.code == NON_GEOGRAPHIC_CODE {
+                return render(normalized, country, extension, PhoneFormat::International);
+            }
             // The NANP convention omits the trunk `1` in written form.
             if let Some(nanp) = nanp_national(country, national) {
                 return format_nanp_national(&nanp);
             }
-            let trunk = national_prefix_for(country.code);
+            // A number that itself begins with `0` is dialled as written,
+            // never behind a trunk prefix.
+            let trunk = if national.starts_with('0') {
+                ""
+            } else {
+                national_format_prefix(country.prefix, national)
+            };
+            let trunk = if reads_back(country, trunk, national) {
+                trunk
+            } else {
+                ""
+            };
             let grouped = group_national(national, country, ' ');
-            let mut out = String::with_capacity(trunk.len() + grouped.len() + 1);
+            let mut out = String::with_capacity(trunk.len() + grouped.len());
             out.push_str(trunk);
-            out.push_str(trunk_separator(country.code));
             out.push_str(&grouped);
             out
         }
@@ -1198,22 +1784,20 @@ fn format_nanp_national(national: &str) -> String {
 }
 
 fn group_national(number: &str, country: &Country, separator: char) -> String {
-    if country.code == "US" || country.code == "CA" {
-        if let Some(groups) = format_grouped(number, &[3, 3, 4], separator) {
-            return groups;
-        }
-    }
-
-    national_group_sizes(country.code, number)
+    national_group_sizes(country.prefix, number)
         .or_else(|| default_group_sizes(number.len()))
         .and_then(|groups| format_grouped(number, groups, separator))
         .unwrap_or_else(|| number.to_string())
 }
 
-fn national_group_sizes(country_code: &str, number: &str) -> Option<&'static [usize]> {
+/// Group sizes for a national number of the plan under `calling_code`, where
+/// the plan has a convention the length-based default does not match. Keyed by
+/// calling code, so a territory inside another country's plan — Guernsey in
+/// the UK's, the Vatican in Italy's — is written like it.
+fn national_group_sizes(calling_code: u32, number: &str) -> Option<&'static [usize]> {
     // Italy keeps its trunk zero; major-city area codes are two digits, while
     // mobile numbers have no zero and group in threes.
-    if country_code == "IT" && number.len() == 10 {
+    if calling_code == 39 && number.len() == 10 {
         return Some(if number.starts_with('0') {
             &[2, 4, 4]
         } else {
@@ -1221,28 +1805,28 @@ fn national_group_sizes(country_code: &str, number: &str) -> Option<&'static [us
         });
     }
 
-    match (country_code, number.len()) {
+    match (calling_code, number.len()) {
         // London, Cardiff and the other two-digit UK area codes.
-        ("GB", 10) => Some(&[2, 4, 4]),
-        ("GB", 9) => Some(&[3, 3, 3]),
-        ("DE", 10) => Some(&[2, 4, 4]),
-        ("DE", 11) => Some(&[3, 4, 4]),
-        ("FR", 9) => Some(&[1, 2, 2, 2, 2]),
+        (44, 10) => Some(&[2, 4, 4]),
+        (44, 9) => Some(&[3, 3, 3]),
+        (49, 10) => Some(&[2, 4, 4]),
+        (49, 11) => Some(&[3, 4, 4]),
+        (33, 9) => Some(&[1, 2, 2, 2, 2]),
         // "01 234 5678" / "085 123 4567" once the trunk zero is prepended.
-        ("IE", 8) => Some(&[1, 3, 4]),
-        ("IE", 9) => Some(&[2, 3, 4]),
+        (353, 8) => Some(&[1, 3, 4]),
+        (353, 9) => Some(&[2, 3, 4]),
         // "082 123 4567" once the trunk zero is prepended.
-        ("ZA", 9) => Some(&[2, 3, 4]),
+        (27, 9) => Some(&[2, 3, 4]),
         // Poland has no trunk prefix: "12 345 67 89".
-        ("PL", 9) => Some(&[2, 3, 2, 2]),
-        ("IN", 10) => Some(&[5, 5]),
-        ("AU", 9) => Some(&[1, 4, 4]),
-        ("NL", 9) => Some(&[1, 4, 4]),
-        ("JP", 10) => Some(&[2, 4, 4]),
-        ("CN", 11) => Some(&[3, 4, 4]),
-        ("BR", 11) => Some(&[2, 5, 4]),
-        ("BR", 10) => Some(&[2, 4, 4]),
-        ("RU", 10) => Some(&[3, 3, 2, 2]),
+        (48, 9) => Some(&[2, 3, 2, 2]),
+        (91, 10) => Some(&[5, 5]),
+        (61, 9) => Some(&[1, 4, 4]),
+        (31, 9) => Some(&[1, 4, 4]),
+        (81, 10) => Some(&[2, 4, 4]),
+        (86, 11) => Some(&[3, 4, 4]),
+        (55, 11) => Some(&[2, 5, 4]),
+        (55, 10) => Some(&[2, 4, 4]),
+        (7, 10) => Some(&[3, 3, 2, 2]),
         _ => None,
     }
 }
@@ -1306,7 +1890,11 @@ fn format_grouped(number: &str, groups: &[usize], separator: char) -> Option<Str
 /// ```
 #[must_use]
 pub fn detect_phone_number_type(phone_number: &str) -> Option<PhoneNumberType> {
-    parse_internal(phone_number).ok().map(|p| p.phone_type)
+    let (digits, resolved, _) = resolve_input(phone_number).ok()?;
+    Some(classify_phone_number_type(
+        national_digits(digits.as_slice(), &resolved),
+        resolved.index,
+    ))
 }
 
 /// Check if a phone number is a mobile number.
@@ -1338,31 +1926,25 @@ pub fn is_toll_free_number(phone_number: &str) -> bool {
 
 /// Classify a national significant number against its country's ranges.
 ///
-/// Range tables are carried for: US, CA and the NANP service codes, GB, IE,
-/// DE, FR, IT, ES, NL, BE, CH, AT, SE, NO, PL, PT, RU, TR, IN, CN, JP, KR, AU,
-/// NZ, BR, ZA, NG. Every other country returns [`PhoneNumberType::Unknown`] —
-/// the crate does not guess from the leading digit, because the guess is wrong
-/// more often than it is right.
-fn classify_phone_number_type(national: &str, country: &Country) -> PhoneNumberType {
+/// Calling code 1 is classified from the NANP area code. Everywhere else the
+/// number's leading digits are looked up in the entry's range table
+/// ([`ranges::TYPE_RANGES`]); a number no range claims is
+/// [`PhoneNumberType::Unknown`] rather than a guess.
+fn classify_phone_number_type(national: &str, index: usize) -> PhoneNumberType {
     use PhoneNumberType::*;
 
+    let country = &COUNTRIES[index];
     let b = national.as_bytes();
-    if b.is_empty() {
-        return Unknown;
-    }
-
-    let d1 = b[0];
-    let n2 = numeric_prefix(b, 2);
-    let n3 = numeric_prefix(b, 3);
-    let n4 = numeric_prefix(b, 4);
 
     // Calling code 1 is classified from the area code, which territories carry
     // in their prefix and the US and Canada in the national number.
     if is_nanp(country.prefix) {
-        let area = if country.prefix >= 1000 {
+        let area = if is_nanp_territory(country.prefix) {
             (country.prefix - 1000) as u16
+        } else if b.len() >= 3 {
+            prefix_value(&b[..3]) as u16
         } else {
-            n3
+            return Unknown;
         };
         return match nanp::country_for_area_code(area) {
             Some(nanp::TOLL_FREE) => TollFree,
@@ -1379,298 +1961,36 @@ fn classify_phone_number_type(national: &str, country: &Country) -> PhoneNumberT
         };
     }
 
-    match country.code {
-        "GB" => match n4 {
-            7000..=7099 => PersonalNumber,
-            7600..=7699 => Pager,
-            _ => match n3 {
-                800 | 808 => TollFree,
-                843 | 844 | 845 | 870 | 871 | 872 => SharedCost,
-                _ => match d1 {
-                    b'1' | b'2' => FixedLine,
-                    b'3' => Uan,
-                    b'5' => Voip,
-                    b'7' => Mobile,
-                    // All of `09` is premium rate, not just `090`.
-                    b'9' => PremiumRate,
-                    _ => Unknown,
-                },
-            },
-        },
+    let Some(&first) = b.first() else {
+        return Unknown;
+    };
+    let plan = &PLANS[index];
+    let fast = plan.first_digit_type[(first - b'0') as usize];
+    if fast != NO_TYPE {
+        return ranges::TYPES[fast as usize];
+    }
 
-        "IE" => match n4 {
-            1800 => TollFree,
-            1850 | 1890 => SharedCost,
-            1520 | 1550 | 1560 | 1570 | 1580 => PremiumRate,
-            _ => match n3 {
-                // `0818` is a shared-cost range inside the `08` block that
-                // otherwise belongs to mobiles.
-                818 => SharedCost,
-                _ => match d1 {
-                    b'8' => Mobile,
-                    b'1'..=b'7' | b'9' => FixedLine,
-                    _ => Unknown,
-                },
-            },
-        },
-
-        "DE" => match n3 {
-            800 => TollFree,
-            900 => PremiumRate,
-            180 => SharedCost,
-            700 => PersonalNumber,
-            164 | 168 | 169 => Pager,
-            _ => match n2 {
-                15..=17 => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        // Three digits once the trunk zero is stripped, so match on `n3`.
-        "FR" => match n3 {
-            800..=805 => TollFree,
-            806..=809 => Uan,
-            810..=819 => SharedCost,
-            820..=899 => PremiumRate,
-            _ => match d1 {
-                b'6' | b'7' => Mobile,
-                b'9' => Voip,
-                b'1'..=b'5' => FixedLine,
-                _ => Unknown,
-            },
-        },
-
-        // Italy keeps its leading zero, so fixed lines start with '0'.
-        "IT" => match n3 {
-            800 | 803 => TollFree,
-            199 | 848 => SharedCost,
-            892 | 894 | 895 | 899 => PremiumRate,
-            _ => match d1 {
-                b'0' => FixedLine,
-                b'3' => Mobile,
-                _ => Unknown,
-            },
-        },
-
-        "ES" => match n3 {
-            800 | 900 => TollFree,
-            803 | 806 | 807 | 905 => PremiumRate,
-            901 | 902 => SharedCost,
-            _ => match d1 {
-                b'6' | b'7' => Mobile,
-                b'8' | b'9' => FixedLine,
-                _ => Unknown,
-            },
-        },
-
-        "NL" => match n3 {
-            800 => TollFree,
-            900 | 906 | 909 => PremiumRate,
-            _ => match d1 {
-                b'6' => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        "BE" => match n3 {
-            800 => TollFree,
-            900 | 901 | 902 | 903 | 905 | 906 | 907 | 909 => PremiumRate,
-            _ => match d1 {
-                b'4' => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        "CH" => match n3 {
-            800 => TollFree,
-            900 | 901 | 906 => PremiumRate,
-            842 | 848 => SharedCost,
-            _ => match d1 {
-                b'7' => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        "AT" => match n3 {
-            800 => TollFree,
-            900 | 930 | 931 | 939 => PremiumRate,
-            810 | 820 | 821 | 828 => SharedCost,
-            _ => match d1 {
-                b'6' => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        // `020` and `077` are two digits once the trunk zero is stripped.
-        "SE" => match n2 {
-            20 => TollFree,
-            77 => SharedCost,
-            _ => match n3 {
-                900 | 939 => PremiumRate,
-                _ => match d1 {
-                    b'7' => Mobile,
-                    _ => FixedLine,
-                },
-            },
-        },
-
-        "NO" => match n3 {
-            800 => TollFree,
-            820 | 829 => PremiumRate,
-            _ => match d1 {
-                b'4' | b'9' => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        "PL" => match n3 {
-            800 => TollFree,
-            700 | 704 => PremiumRate,
-            801 => SharedCost,
-            _ => match n2 {
-                45 | 50 | 51 | 53 | 57 | 60 | 66 | 69 | 72 | 73 | 78 | 79 | 88 => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        "PT" => match n3 {
-            800 => TollFree,
-            808 | 809 => SharedCost,
-            760..=762 => PremiumRate,
-            _ => match d1 {
-                b'9' => Mobile,
-                b'2' => FixedLine,
-                _ => Unknown,
-            },
-        },
-
-        "RU" | "KZ" => match n3 {
-            800 => TollFree,
-            809 => PremiumRate,
-            _ => match d1 {
-                b'9' => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        "TR" => match n3 {
-            800 => TollFree,
-            900 => PremiumRate,
-            444 => Uan,
-            _ => match d1 {
-                b'5' => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        // National numbers carry the STD code, so the two-digit metro codes
-        // 79 (Ahmedabad) and 80 (Bengaluru) land inside the mobile range. The
-        // others (11, 20, 22, 33, 40, 44) are already in the fixed-line range.
-        "IN" => match n2 {
-            79 | 80 if b.len() == 10 => FixedLine,
-            _ => match d1 {
-                b'6'..=b'9' => Mobile,
-                b'1'..=b'5' => FixedLine,
-                _ => Unknown,
-            },
-        },
-
-        "CN" => match n3 {
-            400 | 800 => TollFree,
-            _ => match n2 {
-                13..=19 => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        "JP" => match n3 {
-            120 | 800 => TollFree,
-            570 => SharedCost,
-            990 => PremiumRate,
-            _ => match n2 {
-                70 | 80 | 90 => Mobile,
-                50 => Voip,
-                _ => FixedLine,
-            },
-        },
-
-        // `080` / `060` are two digits once the trunk zero is gone.
-        "KR" => match n2 {
-            80 => TollFree,
-            60 => PremiumRate,
-            50 => Voip,
-            // Representative numbers share their leading pair with the mobile
-            // block; only the length tells them apart.
-            15 | 16 | 18 if b.len() == 8 => Uan,
-            10..=19 => Mobile,
-            _ => FixedLine,
-        },
-
-        "AU" => match n4 {
-            1800 => TollFree,
-            1300 | 1345 => SharedCost,
-            1900..=1902 => PremiumRate,
-            _ => match d1 {
-                b'4' => Mobile,
-                b'2' | b'3' | b'7' | b'8' => FixedLine,
-                _ => Unknown,
-            },
-        },
-
-        "NZ" => match n3 {
-            800 => TollFree,
-            900 => PremiumRate,
-            _ => match d1 {
-                b'2' => Mobile,
-                b'3' | b'4' | b'6' | b'7' | b'9' => FixedLine,
-                _ => Unknown,
-            },
-        },
-
-        // Brazil: an 11-digit national number carries the mobile `9` right
-        // after the two-digit area code.
-        "BR" => match n3 {
-            800 => TollFree,
-            300 | 400 => SharedCost,
-            900 => PremiumRate,
-            _ => {
-                if b.len() == 11 && b[2] == b'9' {
-                    Mobile
-                } else if b.len() == 10 {
-                    FixedLine
-                } else {
-                    Unknown
-                }
+    // For any one length the rules are prefix-free, so the first rule that
+    // covers the number's length is the only one that can.
+    const KEY_OFFSET: [u32; ranges::MAX_PREFIX_DIGITS] = [0, 10, 110];
+    let rules = plan.types;
+    let length_bit = b
+        .len()
+        .checked_sub(ranges::MIN_RULE_LENGTH)
+        .map_or(0, |shift| 1u32 << shift);
+    let mut value = 0u32;
+    for (len, &digit) in b.iter().take(ranges::MAX_PREFIX_DIGITS).enumerate() {
+        value = value * 10 + (digit - b'0') as u32;
+        let key = KEY_OFFSET[len] + value;
+        let start = rules.partition_point(|&rule| rule >> 16 < key);
+        for &rule in rules[start..].iter().take_while(|&&rule| rule >> 16 == key) {
+            let lengths = rule & 0xFFF;
+            if lengths == 0 || lengths & length_bit != 0 {
+                return ranges::TYPES[(rule >> 12 & 0xF) as usize];
             }
-        },
-
-        "ZA" => match n2 {
-            80 => TollFree,
-            86 => SharedCost,
-            87 => Voip,
-            _ => match d1 {
-                b'6' | b'7' | b'8' => Mobile,
-                _ => FixedLine,
-            },
-        },
-
-        "NG" => match n2 {
-            70 | 80 | 81 | 90 | 91 => Mobile,
-            _ => FixedLine,
-        },
-
-        _ => Unknown,
+        }
     }
-}
-
-/// First `count` digits of `b` as a number, or `u16::MAX` if it is shorter.
-fn numeric_prefix(b: &[u8], count: usize) -> u16 {
-    if b.len() < count {
-        return u16::MAX;
-    }
-    b[..count]
-        .iter()
-        .fold(0u16, |acc, &x| acc * 10 + (x - b'0') as u16)
+    Unknown
 }
 
 // ============================================================================
@@ -1768,11 +2088,15 @@ impl Rng {
 /// E.164 form, and [`extract_country`] resolves it back to the country asked
 /// for.
 ///
+/// Territories that share a calling code — Jersey inside `+44`, Kazakhstan
+/// inside `+7`, the Vatican inside `+39` — get a number from one of their own
+/// blocks.
+///
 /// # Returns `None` when
-/// - the ISO 3166-1 alpha-2 code is not in the country table, or
-/// - another country on the same calling code covers its lengths, so no number
-///   can be minted that resolves back to it — Jersey and Guernsey inside `+44`,
-///   Kazakhstan inside `+7`, the Vatican inside `+39`.
+/// - the code is not in the country table, or
+/// - the territory has no numbers of its own to draw from: Western Sahara is
+///   served entirely from Morocco's `+212` ranges, and South Georgia from the
+///   Falklands' `+500`, so every number resolves to the main region.
 ///
 /// # Note
 /// The digits come from a PRNG intended for sample and test data. It is not
@@ -1788,9 +2112,9 @@ impl Rng {
 /// ```
 #[must_use]
 pub fn generate_random_phone_number(country_code: &str) -> Option<String> {
-    let country = country_by_code(country_code)?;
+    let index = country_index(country_code)?;
     let mut rng = Rng::from_entropy();
-    generate_for(country, &mut rng)
+    generate_for(index, &mut rng)
 }
 
 /// Generate several random valid phone numbers for a country.
@@ -1808,7 +2132,7 @@ pub fn generate_random_phone_number(country_code: &str) -> Option<String> {
 /// ```
 #[must_use]
 pub fn generate_random_phone_numbers(country_code: &str, count: usize) -> Vec<String> {
-    let Some(country) = country_by_code(country_code) else {
+    let Some(index) = country_index(country_code) else {
         return Vec::new();
     };
 
@@ -1819,7 +2143,7 @@ pub fn generate_random_phone_numbers(country_code: &str, count: usize) -> Vec<St
     let mut rng = Rng::from_entropy();
 
     for _ in 0..count {
-        match generate_for(country, &mut rng) {
+        match generate_for(index, &mut rng) {
             Some(number) => numbers.push(number),
             None => break,
         }
@@ -1828,21 +2152,33 @@ pub fn generate_random_phone_numbers(country_code: &str, count: usize) -> Vec<St
     numbers
 }
 
-fn generate_for(country: &'static Country, rng: &mut Rng) -> Option<String> {
+fn generate_for(index: usize, rng: &mut Rng) -> Option<String> {
+    let country = &COUNTRIES[index];
     if country.phone_lengths.is_empty() {
         return None;
     }
+    // A territory sharing a calling code is only reported for numbers in its
+    // own blocks, so draw from those.
+    let territory = PLANS[index].territory;
 
     // Retry rather than emit an invalid number: a random national can land on
-    // a range the validator rejects (an unassigned NANP exchange, say).
+    // a length the validator rejects for its leading digit.
     for _ in 0..64 {
-        let index = rng.below(country.phone_lengths.len() as u64) as usize;
-        let length = country.phone_lengths[index] as usize;
+        let pick = rng.below(country.phone_lengths.len() as u64) as usize;
+        let length = country.phone_lengths[pick] as usize;
 
         let national = if country.prefix == 1 {
             generate_nanp_national(country.code, rng)?
-        } else {
+        } else if territory.is_empty() {
             generate_national(length, rng)
+        } else {
+            let block = territory[rng.below(territory.len() as u64) as usize];
+            let mut national = String::with_capacity(length);
+            national.push_str(block);
+            while national.len() < length {
+                national.push(char::from(rng.digit()));
+            }
+            national
         };
 
         let mut candidate = String::with_capacity(national.len() + 5);
@@ -1891,7 +2227,8 @@ fn generate_nanp_national(iso: &str, rng: &mut Rng) -> Option<String> {
 
     let mut national = String::with_capacity(10);
     national.push_str(&area.to_string());
-    // Central office code: first digit 2-9, never the N11 form.
+    // Central office code: first digit 2-9. N11 exchanges exist, but only in
+    // a few places, so a generated number avoids them.
     loop {
         let a = b'2' + rng.below(8) as u8;
         let b = rng.digit();
@@ -2200,6 +2537,11 @@ pub fn suggest_phone_number_corrections(
     // drive the search. Nothing longer than one digit over the E.164 ceiling
     // could be fixed by the single-edit repairs we attempt anyway.
     if digits.is_empty() || digits.len() > E164_MAX_DIGITS + 1 {
+        return Vec::new();
+    }
+    // Without a hint, digits too few to read as a number even after the
+    // one-digit insertion below are not a phone number with a typo in it.
+    if hinted.is_none() && digits.len() + 1 < MIN_UNMARKED_DIGITS {
         return Vec::new();
     }
 
@@ -2558,13 +2900,28 @@ pub fn redact_phone_numbers(text: &str, visible_digits: usize) -> String {
 /// assert_eq!(a.e164(), "+12025550173");
 /// assert_eq!(a.country().code, "US");
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PhoneNumber {
-    original: String,
-    normalized: String,
+    /// The E.164 form immediately followed by the input as supplied: one
+    /// allocation for both.
+    text: String,
+    /// Length of the E.164 form at the front of `text`.
+    e164_len: usize,
     country: &'static Country,
     phone_type: PhoneNumberType,
     extension: Option<String>,
+}
+
+impl std::fmt::Debug for PhoneNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhoneNumber")
+            .field("original", &self.original())
+            .field("normalized", &self.e164())
+            .field("country", &self.country)
+            .field("phone_type", &self.phone_type)
+            .field("extension", &self.extension)
+            .finish()
+    }
 }
 
 impl PhoneNumber {
@@ -2591,14 +2948,28 @@ impl PhoneNumber {
     /// assert_eq!(PhoneNumber::try_parse("+1202555").unwrap_err(), ParseError::InvalidLength);
     /// ```
     pub fn try_parse(input: &str) -> Result<Self, ParseError> {
-        let parsed = parse_internal(input)?;
-        Ok(PhoneNumber {
-            original: input.to_string(),
-            normalized: parsed.normalized,
+        Self::parse_as(input, input)
+    }
+
+    /// Parse `input`, recording `original` as what the caller supplied.
+    fn parse_as(input: &str, original: &str) -> Result<Self, ParseError> {
+        let (digits, resolved, extension) = resolve_input(input)?;
+        let parsed = Parsed::new(digits.as_slice(), &resolved, extension, original.len());
+        Ok(Self::from_parsed(parsed, original))
+    }
+
+    /// `parsed` must have been built with room for `original` to spare.
+    fn from_parsed(parsed: Parsed, original: &str) -> Self {
+        let mut text = parsed.normalized;
+        let e164_len = text.len();
+        text.push_str(original);
+        PhoneNumber {
+            text,
+            e164_len,
             country: parsed.country,
             phone_type: parsed.phone_type,
             extension: parsed.extension,
-        })
+        }
     }
 
     /// Parse a number that may be in national format, using a country hint.
@@ -2612,12 +2983,25 @@ impl PhoneNumber {
     /// hint only says to read the digits as a ten-digit North American number,
     /// and supplies the area code for a local seven-digit one.
     ///
+    /// The hint country's trunk prefix is understood (`0` almost everywhere,
+    /// `8` in Russia, `06` in Hungary), and so are the international access
+    /// codes dialled from it (`00`, `011` from North America, `010` from Japan,
+    /// `810` from Russia).
+    ///
     /// # Examples
     /// ```
     /// use phonelib::PhoneNumber;
     ///
     /// // National format resolved through the hint.
     /// let n = PhoneNumber::parse_with_country("020 7946 0958", "GB").unwrap();
+    /// assert_eq!(n.e164(), "+442079460958");
+    ///
+    /// // Hungary's trunk prefix is `06`, not `0`.
+    /// let n = PhoneNumber::parse_with_country("06 1 234 5678", "HU").unwrap();
+    /// assert_eq!(n.e164(), "+3612345678");
+    ///
+    /// // A number dialled from Japan, through its `010` access code.
+    /// let n = PhoneNumber::parse_with_country("010 44 20 7946 0958", "JP").unwrap();
     /// assert_eq!(n.e164(), "+442079460958");
     ///
     /// // The number's own country code wins over a contradicting hint.
@@ -2634,117 +3018,145 @@ impl PhoneNumber {
 
     /// Like [`PhoneNumber::parse_with_country`] but reports why it failed.
     pub fn try_parse_with_country(input: &str, country_code: &str) -> Result<Self, ParseError> {
-        let hint = country_by_code(country_code).ok_or(ParseError::UnknownCountry)?;
-
-        // Preserved verbatim for `original()`.
-        let original = input;
+        let index = country_index(country_code).ok_or(ParseError::UnknownCountry)?;
+        let hint = &COUNTRIES[index];
 
         // A `tel:` URI and an explicit '+' both carry their own country code,
         // so the hint must not be applied on top.
         let trimmed = strip_tel_uri(input.trim());
-        if trimmed.len() != input.trim().len() || trimmed.starts_with(['+', '\u{FF0B}']) {
-            return Self::try_parse(trimmed).map(|mut parsed| {
-                parsed.original = original.to_string();
-                parsed
-            });
-        }
-        let input = trimmed;
-
-        let (base, extension) = split_extension(input);
-        let digits: String = base
-            .chars()
-            .filter_map(|c| digit_value(c).map(char::from))
-            .collect();
-        if digits.is_empty() {
-            return Err(ParseError::Empty);
+        let (base, extension) = split_extension(trimmed);
+        let scanned = scan_digits(base)?;
+        if trimmed.len() != input.trim().len() || scanned.explicit_international {
+            return Self::parse_as(trimmed, input);
         }
 
-        let suffix = extension
-            .map(|e| format!(" ext. {}", e))
-            .unwrap_or_default();
+        let digits = scanned.as_slice();
+        let finish = |global: &[u8], resolved: Resolved| {
+            Self::from_parsed(
+                Parsed::new(global, &resolved, extension, input.len()),
+                input,
+            )
+        };
+        // A reading of the digits that spells out the calling code itself.
+        let as_global =
+            |global: &[u8]| resolve_digits(global, true).map(|resolved| finish(global, resolved));
+        // A reading of the digits as a national number of `calling_code`.
+        let as_national = |calling_code: u32, national: &[u8]| {
+            let global = Digits::global(calling_code, national)?;
+            resolve_digits(global.as_slice(), true)
+                .map(|resolved| finish(global.as_slice(), resolved))
+        };
+        let (early, late) = (PLANS[index].early_access, PLANS[index].late_access);
+        let after_access_code = |codes: &mut dyn Iterator<Item = &str>| {
+            codes
+                .filter_map(|code| digits.strip_prefix(code.as_bytes()))
+                .find_map(|rest| as_global(rest).ok())
+        };
 
-        // A national number never begins with two zeros, so `00`/`0011` is
-        // unambiguously an access code. `011` is not — a Japanese `0114…` is
-        // Sapporo — so it waits until after the national readings below.
-        if digits.starts_with("00") {
-            for idd in ["0011", "00"] {
-                if let Some(rest) = digits.strip_prefix(idd) {
-                    if let Ok(mut parsed) = Self::try_parse(&format!("+{}{}", rest, suffix)) {
-                        parsed.original = original.to_string();
-                        return Ok(parsed);
-                    }
-                }
+        // A national number never begins with two zeros, so a `00…` access
+        // code cannot be mistaken for one — except in the few plans that do
+        // have `00…` numbers of their own (Japanese and Korean freephone, say),
+        // which get their national reading first.
+        let double_zero = digits.starts_with(b"00");
+        let zero_led_plan = PLANS[index].double_zero_led;
+        let (early_now, early_later): (Vec<&str>, Vec<&str>) = early
+            .iter()
+            .partition(|code| !(zero_led_plan && code.starts_with("00")));
+
+        // The plan's own access codes that no national number is dialled like
+        // come first: `8 10 44 …` from Russia is never a Russian number.
+        if let Some(parsed) = after_access_code(&mut early_now.into_iter()) {
+            return Ok(parsed);
+        }
+
+        if double_zero && !zero_led_plan {
+            if let Some(parsed) = after_access_code(&mut ["0011", "00"].into_iter()) {
+                return Ok(parsed);
             }
         }
 
-        // Candidate global numbers to try, most likely reading first.
-        let mut attempts: Vec<String> = Vec::new();
-
-        if is_nanp(hint.prefix) {
+        let national = if is_nanp(hint.prefix) {
             // Ten flat digits, written bare, with the long-distance trunk
             // `1`, or — for a territory hint — as a local number needing its
             // area code back. The area code, not the hint, picks the country.
-            attempts.push(format!("+1{}", digits));
-            if let Some(rest) = digits.strip_prefix('1') {
-                attempts.push(format!("+1{}", rest));
+            let mut readings = vec![as_national(1, digits)];
+            if let Some(rest) = digits.strip_prefix(b"1") {
+                readings.push(as_national(1, rest));
             }
             if is_nanp_territory(hint.prefix) {
-                attempts.push(format!("+{}{}", hint.prefix, digits));
+                readings.push(as_national(hint.prefix, digits));
             }
+            first_ok(readings)
         } else {
-            // National format. Removing a trunk prefix is the likelier
-            // reading where the country has one; otherwise prefer the digits
-            // as written, which keeps a significant leading zero intact.
-            let trunk = national_prefix_for(hint.code);
-            if !trunk.is_empty() {
-                if let Some(rest) = digits.strip_prefix(trunk) {
-                    attempts.push(format!("+{}{}", hint.prefix, rest));
-                }
-            }
-            attempts.push(format!("+{}{}", hint.prefix, digits));
-            if trunk.is_empty() {
-                if let Some(rest) = digits.strip_prefix('0') {
-                    attempts.push(format!("+{}{}", hint.prefix, rest));
-                }
-            }
-        }
+            // With the trunk prefix removed, or as written — the resolver
+            // itself reads a leading `0` as a trunk where the plan has one.
+            // What is left after a trunk never starts with `0`: a number that
+            // does is one of the plan's own `0…` numbers, dialled as written.
+            let trunks = std::iter::once(national_prefix_for(hint.code)).chain(
+                constants::EXTRA_NATIONAL_PREFIXES
+                    .iter()
+                    .filter(|(code, _)| *code == hint.code)
+                    .map(|(_, trunk)| *trunk),
+            );
+            let mut readings: Vec<_> = trunks
+                .filter(|trunk| !trunk.is_empty())
+                .filter_map(|trunk| digits.strip_prefix(trunk.as_bytes()))
+                .filter(|rest| rest.first().is_some_and(|&d| d != b'0'))
+                .map(|rest| as_national(hint.prefix, rest))
+                .collect();
+            readings.push(as_national(hint.prefix, digits));
+            first_ok(readings)
+        };
+        let national_error = match national {
+            Ok(parsed) => return Ok(parsed),
+            Err(error) => error,
+        };
 
-        for candidate in attempts {
-            if let Ok(mut parsed) = Self::try_parse(&format!("{}{}", candidate, suffix)) {
-                parsed.original = original.to_string();
+        if double_zero && zero_led_plan {
+            if let Some(parsed) =
+                after_access_code(&mut early_later.into_iter().chain(["0011", "00"]))
+            {
                 return Ok(parsed);
             }
         }
 
-        // `011` as an access code, after the national readings for the
-        // reason given above.
-        if let Some(rest) = digits.strip_prefix("011") {
-            if let Ok(mut parsed) = Self::try_parse(&format!("+{}{}", rest, suffix)) {
-                parsed.original = original.to_string();
-                return Ok(parsed);
+        // The plan's other access codes, then `011`, after the national
+        // readings: they can begin a national number, as Turin's `011` does.
+        if let Some(parsed) =
+            after_access_code(&mut late.iter().copied().chain(std::iter::once("011")))
+        {
+            return Ok(parsed);
+        }
+
+        // Last resort: the hint's own calling code written without its '+',
+        // perhaps behind a stray trunk prefix (`0 44 20 7946 0958`). Only the
+        // hint's — reading a national number as whatever country its digits
+        // happen to spell would contradict the hint.
+        let mut code_digits = String::with_capacity(4);
+        push_prefix_digits(&mut code_digits, hint.prefix);
+        let trunk = national_prefix_for(hint.code).as_bytes();
+        let behind_trunk = digits.strip_prefix(trunk).filter(|_| !trunk.is_empty());
+        for global in [Some(digits), behind_trunk].into_iter().flatten() {
+            if global.starts_with(code_digits.as_bytes()) {
+                if let Ok(parsed) = as_global(global) {
+                    return Ok(parsed);
+                }
             }
         }
 
-        // Last resort: read the digits as though they spelled out their own
-        // calling code. Last, so the hint wins on a coincidental match. The
-        // explicit `+` is what lets this past the ambiguity check — the hint
-        // is the caller vouching that these digits are a whole number.
-        Self::try_parse(&format!("+{}{}", digits, suffix)).map(|mut parsed| {
-            parsed.original = original.to_string();
-            parsed
-        })
+        Err(national_error)
     }
 
     /// The input exactly as it was supplied.
     #[must_use]
     pub fn original(&self) -> &str {
-        &self.original
+        &self.text[self.e164_len..]
     }
 
     /// The E.164 form, without any extension.
     #[must_use]
     pub fn e164(&self) -> &str {
-        &self.normalized
+        &self.text[..self.e164_len]
     }
 
     /// The national significant number, without the country calling code.
@@ -2758,7 +3170,7 @@ impl PhoneNumber {
     /// ```
     #[must_use]
     pub fn national_number(&self) -> &str {
-        &self.normalized[1 + prefix_digit_count(self.country.prefix)..]
+        &self.e164()[1 + prefix_digit_count(self.country.prefix)..]
     }
 
     /// The resolved country.
@@ -2815,12 +3227,7 @@ impl PhoneNumber {
     /// ```
     #[must_use]
     pub fn format(&self, fmt: PhoneFormat) -> String {
-        render(
-            &self.normalized,
-            self.country,
-            self.extension.as_deref(),
-            fmt,
-        )
+        render(self.e164(), self.country, self.extension.as_deref(), fmt)
     }
 
     /// Whether this number is mobile.
@@ -2844,7 +3251,7 @@ impl PhoneNumber {
 
 impl PartialEq for PhoneNumber {
     fn eq(&self, other: &Self) -> bool {
-        self.normalized == other.normalized
+        self.e164() == other.e164()
     }
 }
 
@@ -2858,25 +3265,25 @@ impl PartialOrd for PhoneNumber {
 
 impl Ord for PhoneNumber {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.normalized.cmp(&other.normalized)
+        self.e164().cmp(other.e164())
     }
 }
 
 impl std::hash::Hash for PhoneNumber {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.normalized.hash(state);
+        self.e164().hash(state);
     }
 }
 
 impl std::fmt::Display for PhoneNumber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.normalized)
+        f.write_str(self.e164())
     }
 }
 
 impl AsRef<str> for PhoneNumber {
     fn as_ref(&self) -> &str {
-        &self.normalized
+        self.e164()
     }
 }
 
@@ -2959,10 +3366,10 @@ impl PhoneNumberSet {
     /// ```
     pub fn try_add(&mut self, phone_number: &str) -> Result<bool, ParseError> {
         let phone = PhoneNumber::try_parse(phone_number)?;
-        if self.numbers.contains_key(&phone.normalized) {
+        if self.numbers.contains_key(phone.e164()) {
             return Ok(false);
         }
-        self.numbers.insert(phone.normalized.clone(), phone);
+        self.numbers.insert(phone.e164().to_string(), phone);
         Ok(true)
     }
 

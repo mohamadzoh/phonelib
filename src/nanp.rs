@@ -42,7 +42,7 @@
 //! This is area-code granularity **only**. A `+1` number whose area code
 //! appears here is plausible, not proven: the seven-digit subscriber part is
 //! not validated beyond the structural central-office rule in
-//! [`is_valid_exchange_format`]. Establishing that a particular NXX block is
+//! [`is_valid_exchange_format`] (first digit 2-9). Establishing that a particular NXX block is
 //! in service requires the full NPA-NXX assignment database, which is several
 //! orders of magnitude larger and changes daily.
 
@@ -62,8 +62,10 @@ pub(crate) const NON_GEOGRAPHIC: &str = "XN";
 
 /// True if `tag` is one of the non-geographic sentinels rather than an
 /// ISO 3166-1 country code.
-pub(crate) fn is_non_geographic(tag: &str) -> bool {
-    matches!(tag, TOLL_FREE | PREMIUM_RATE | NON_GEOGRAPHIC)
+pub(crate) const fn is_non_geographic(tag: &str) -> bool {
+    crate::const_str_eq(tag, TOLL_FREE)
+        || crate::const_str_eq(tag, PREMIUM_RATE)
+        || crate::const_str_eq(tag, NON_GEOGRAPHIC)
 }
 
 /// Every assigned NANP area code paired with the ISO 3166-1 alpha-2 code of
@@ -605,9 +607,15 @@ pub(crate) fn is_valid_area_code_format(area_code: u16) -> bool {
 }
 
 /// True if `exchange` (the three-digit central office code) is structurally
-/// valid: first digit 2-9, and not the N11 form.
+/// valid: first digit 2-9.
+///
+/// Unlike an area code, an exchange *can* take the N11 form. Guidelines keep
+/// N11 codes out of new geographic assignments, but they are in service
+/// wherever dialling cannot confuse them with the 211-911 service codes:
+/// Montserrat's fixed lines are 664-410 to 664-413, and toll-free numbers
+/// such as 1-800-411-7246 are dialled with the `1` and area code in front.
 pub(crate) fn is_valid_exchange_format(exchange: u16) -> bool {
-    (200..=999).contains(&exchange) && exchange % 100 != 11
+    (200..=999).contains(&exchange)
 }
 
 #[cfg(test)]
@@ -725,10 +733,13 @@ mod tests {
         }
     }
 
+    /// N11 is only reserved as an *area* code. As an exchange it is live:
+    /// Montserrat's fixed lines are 664-411-xxxx, and 1-800-411-PAIN is a
+    /// long-running toll-free number.
     #[test]
-    fn rejects_n11_exchanges() {
+    fn accepts_n11_exchanges() {
         for code in N11_CODES {
-            assert!(!is_valid_exchange_format(code), "exchange {code}");
+            assert!(is_valid_exchange_format(code), "exchange {code}");
         }
     }
 

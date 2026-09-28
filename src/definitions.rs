@@ -15,13 +15,16 @@ use std::fmt;
 pub struct Country {
     /// English name of the country or territory.
     pub name: &'static str,
-    /// ISO 3166-1 alpha-2 code.
+    /// ISO 3166-1 alpha-2 code, or `"001"` — the UN M.49 code for the world,
+    /// as libphonenumber uses — for the ITU's non-geographic calling codes
+    /// (`+800` freephone, `+870` Inmarsat, …).
     ///
     /// Several entries may share a code when a country operates more than one
     /// calling code (for example the Dominican Republic's 1809/1829/1849
-    /// overlays).
+    /// overlays), and every non-geographic entry shares `"001"`.
     pub code: &'static str,
-    /// Valid lengths of the national significant number, in digits.
+    /// Every length the national significant number can have, in digits,
+    /// across all kinds of number — fixed line, mobile, freephone and so on.
     ///
     /// This excludes the country calling code and any national trunk prefix.
     pub phone_lengths: &'static [u8],
@@ -41,9 +44,9 @@ impl fmt::Display for Country {
 /// The service class of a phone number.
 ///
 /// Classification is metadata-driven and only as good as the ranges the crate
-/// knows about. For countries without a published range table the crate
-/// returns [`PhoneNumberType::Unknown`] rather than guessing; see the crate
-/// docs for the list of countries with full classification support.
+/// knows about. A number in a block no range table claims is
+/// [`PhoneNumberType::Unknown`] rather than a guess; a number's type never
+/// affects whether it is valid.
 ///
 /// This enum is `#[non_exhaustive]`: new variants may be added in future
 /// releases, so `match` on it must include a wildcard arm.
